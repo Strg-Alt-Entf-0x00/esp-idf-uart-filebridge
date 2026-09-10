@@ -22,7 +22,7 @@ UART is an ancient protocol, but when implemented correctly, it is **rock solid*
 
 ---
 
-## ⚡ Real-World Performance
+## Real-World Performance
 
 Measured on one ESP32-P4 setup (360 MHz) using an FT232R adapter at **3,000,000 baud** with Hardware Flow Control enabled.
 
