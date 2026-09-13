@@ -1,6 +1,6 @@
 ﻿#!/usr/bin/env python3
 """
-Comprehensive test suite for esp-uart-filebridge.
+Comprehensive test suite for esp-idf-uart-filebridge.
 
 Tests all functionality end-to-end:
 - Basic connection and device info

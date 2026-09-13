@@ -303,81 +303,81 @@ When an AI agent is tasked with transferring files to the ESP32 using this bridg
 3. **Mount Point:** The target ESP32 SD card is mounted at `/sd/`. All remote paths MUST start with `/sd/` (e.g. `/sd/models/`).
 4. **Port Conflicts:** The ESP32 monitor must not block the bridge's COM port. If a `Sync timeout` or `Access denied` occurs, the monitor on the other port might be causing a reset loop or blocking the port.
 
-### Vollständige Anleitung: Dateien zwischen PC und ESP32-SD-Karte kopieren
+### Complete Guide: Transfer Files Between a PC and an ESP32 SD Card
 
-**Voraussetzungen:**
-- ESP32-Firmware mit aktiviertem esp-idf-uart-filebridge
-- ESP32 über USB-UART mit dem PC verbunden (z.B. COM13)
-- SD-Karte im ESP32 eingelegt
-- UART-Verbindung: TX, RX, RTS, CTS und GND
-- Baudrate: 3000000
+**Prerequisites:**
+- ESP32 firmware with esp-idf-uart-filebridge enabled
+- ESP32 connected to the PC via USB-UART (for example, COM13)
+- SD card inserted in the ESP32
+- UART wiring: TX, RX, RTS, CTS, and GND
+- Baud rate: 3000000
 
-*WICHTIG:* Der ESP32-Monitor darf während der Dateiübertragung nicht laufen, weil er den COM-Port geöffnet hält. Vorher den Monitor schließen.
+*Important:* Do not run the ESP32 monitor during file transfers because it keeps the COM port open. Close the monitor first.
 
-**1. In den Python-Ordner wechseln:**
+**1. Change to the Python tools directory:**
 ```bash
 cd "managed_components/Strg-Alt-Entf-0x00__esp-idf-uart-filebridge/tools_py"
 ```
 
-**2. Python-Abhängigkeiten installieren:**
+**2. Install the Python dependencies:**
 ```bash
 py -3 -m pip install pyserial
 ```
 
-**3. Verbindung testen und Geräteinformationen anzeigen:**
+**3. Test the connection and show device information:**
 ```bash
 py -3 -m esp_idf_uart_filebridge.cli --port COM13 info
 ```
 
-**4. Inhalt der SD-Karte anzeigen:**
+**4. List the SD card contents:**
 ```bash
 py -3 -m esp_idf_uart_filebridge.cli --port COM13 ls /sd/
 py -3 -m esp_idf_uart_filebridge.cli --port COM13 ls /sd/models/
 ```
 
-**5. Einen Ordner auf der SD-Karte erstellen:**
+**5. Create a directory on the SD card:**
 ```bash
 py -3 -m esp_idf_uart_filebridge.cli --port COM13 mkdir /sd/test
 ```
 
-**6. Datei vom PC auf die ESP32-SD-Karte kopieren:**
+**6. Upload a file from the PC to the ESP32 SD card:**
 ```bash
-py -3 -m esp_idf_uart_filebridge.cli --port COM13 upload "D:\QUELLE\datei.bin" "/sd/test/datei.bin" --verify
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 upload "D:\SOURCE\file.bin" "/sd/test/file.bin" --verify
 ```
 
-**7. Datei von der ESP32-SD-Karte auf den PC kopieren:**
+**7. Download a file from the ESP32 SD card to the PC:**
 ```bash
-py -3 -m esp_idf_uart_filebridge.cli --port COM13 download "/sd/models/modell.bin" "D:\Temp\modell_kopie.bin"
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 download "/sd/models/model.bin" "D:\Temp\model_copy.bin"
 ```
 
-**8. Einen kompletten Ordner vom PC auf die SD-Karte kopieren:**
+**8. Upload a complete directory from the PC to the SD card:**
 ```bash
-py -3 -m esp_idf_uart_filebridge.cli --port COM13 upload_dir "D:\MeinOrdner" "/sd/meinordner"
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 upload_dir "D:\MyDirectory" "/sd/mydirectory"
 ```
 
-**9. Datei-Informationen anzeigen:**
+**9. Show file information:**
 ```bash
 py -3 -m esp_idf_uart_filebridge.cli --port COM13 stat /sd/models/modell.bin
 ```
 
-**10. CRC32-Prüfsumme einer Datei anzeigen:**
+**10. Show a file's CRC32 checksum:**
 ```bash
 py -3 -m esp_idf_uart_filebridge.cli --port COM13 hash /sd/models/modell.bin
 ```
 
-**11. Datei oder Ordner löschen:**
+**11. Delete a file or directory:**
 ```bash
-py -3 -m esp_idf_uart_filebridge.cli --port COM13 delete /sd/test/datei.bin
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 delete /sd/test/file.bin
 ```
 
-**12. Datei auf der SD-Karte umbenennen oder verschieben:**
+**12. Rename or move a file on the SD card:**
 ```bash
-py -3 -m esp_idf_uart_filebridge.cli --port COM13 rename "/sd/alt.bin" "/sd/neu.bin"
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 rename "/sd/old.bin" "/sd/new.bin"
 ```
 
-**13. Datei auf der SD-Karte kopieren:**
+**13. Copy a file on the SD card:**
 ```bash
-py -3 -m esp_idf_uart_filebridge.cli --port COM13 copy "/sd/alt.bin" "/sd/kopie.bin"
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 copy "/sd/old.bin" "/sd/copy.bin"
 ```
 
 
@@ -385,4 +385,5 @@ py -3 -m esp_idf_uart_filebridge.cli --port COM13 copy "/sd/alt.bin" "/sd/kopie.
 
 ## License
 
-MIT - see LICENSE file.
+The Unlicense - see LICENSE file. The software is released into the public
+domain where legally possible, with no attribution requirement and no warranty.
