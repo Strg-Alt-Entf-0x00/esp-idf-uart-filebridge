@@ -1,8 +1,8 @@
 ﻿"""
-esp_uart_filebridge - Host-side Python package for ESP32 UART file bridge.
+esp_idf_uart_filebridge - Host-side Python package for ESP-IDF UART file bridge.
 
 Usage:
-    from esp_uart_filebridge import FileManager
+    from esp_idf_uart_filebridge import FileManager
 
     fm = FileManager("COM4", baud=3000000)
     fm.connect()

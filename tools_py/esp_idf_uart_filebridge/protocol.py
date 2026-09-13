@@ -142,7 +142,7 @@ class ESP32Protocol:
             logger.info(f"Probing {port.device}...")
             if self.connect(port.device):
                 info = self.get_device_info()
-                if info and info.device_name.startswith("ESP32-P4"):
+                if info:
                     logger.info(f"Found {info.device_name} on {port.device}!")
                     self.chunk_size = info.optimal_chunk_size
                     self.max_payload = info.max_payload_size

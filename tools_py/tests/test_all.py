@@ -12,8 +12,8 @@ Tests all functionality end-to-end:
 - WebDAV functionality (if available)
 
 Usage:
-    python test_all.py --port COM13
-    python test_all.py --port COM13 --test-webdav
+    python tests/test_all.py --port COM13
+    python tests/test_all.py --port COM13 --test-webdav
 """
 
 import sys
@@ -24,11 +24,11 @@ import time
 import binascii
 from pathlib import Path
 
-# Add parent to path for local testing
-sys.path.insert(0, str(Path(__file__).parent))
+# Add the tools_py directory to the import path for direct execution.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from esp_uart_filebridge.protocol import ESP32Protocol, ESP32ProtocolError
-from esp_uart_filebridge.file_manager import ESP32FileManager
+from esp_idf_uart_filebridge.protocol import ESP32Protocol, ESP32ProtocolError
+from esp_idf_uart_filebridge.file_manager import ESP32FileManager
 
 # Test configuration
 TEST_DIR = "/sd/test_filebridge"
@@ -88,7 +88,8 @@ class LiveTestRunner:
         log_test("Setup - Connect to ESP32")
         try:
             self.proto = ESP32Protocol()
-            self.proto.connect(self.port, self.baud)
+            if not self.proto.connect(self.port, self.baud):
+                raise ESP32ProtocolError(f"Could not connect to {self.port}")
             self.manager = ESP32FileManager(self.proto)
             log_pass(f"Connected to {self.port} @ {self.baud:,} baud")
             return True
@@ -350,23 +351,45 @@ class LiveTestRunner:
         log_test("Directory Delete")
         
         try:
-            # Delete nested directory (should be empty)
+            # Verify recursive deletion of a directory containing a file.
             nested = f"{TEST_DIR}/subdir/nested"
-            log_info(f"Deleting empty directory: {nested}")
+            log_info(f"Deleting directory: {nested}")
             self.manager.delete_file(nested)
             log_pass(f"Deleted: {nested}")
             
-            # Try to delete non-empty directory (should fail or work recursively)
+            marker = f"{TEST_DIR}/subdir/delete_marker.bin"
+            self.manager.upload_file_from_bytes(b"delete me", marker)
             log_info(f"Deleting directory: {TEST_DIR}/subdir")
+            self.manager.delete_file(f"{TEST_DIR}/subdir")
             try:
-                self.manager.delete_file(f"{TEST_DIR}/subdir")
-                log_pass("Directory deleted")
-            except Exception as e:
-                log_warn(f"Non-empty directory delete failed (expected): {e}")
+                self.manager.get_file_stat(f"{TEST_DIR}/subdir")
+            except ESP32ProtocolError:
+                log_pass("Recursive directory deletion verified")
+            else:
+                raise AssertionError("Directory still exists after recursive delete")
             
             self.passed += 1
             return True
         
+        except Exception as e:
+            log_fail(f"Failed: {e}")
+            self.failed += 1
+            return False
+
+    def test_file_overwrite(self):
+        """Test replacing an existing remote file."""
+        log_test("File Overwrite")
+        remote_path = f"{TEST_DIR}/overwrite.bin"
+        content = b"replacement content" * 256
+        try:
+            self.manager.upload_file_from_bytes(b"old content", remote_path)
+            self.manager.upload_file_from_bytes(content, remote_path)
+            downloaded = self.manager.download_file_to_bytes(remote_path)
+            if downloaded != content:
+                raise AssertionError("Overwritten file content does not match")
+            log_pass("Existing file overwritten and verified")
+            self.passed += 1
+            return True
         except Exception as e:
             log_fail(f"Failed: {e}")
             self.failed += 1
@@ -499,17 +522,17 @@ class LiveTestRunner:
         log_test("WebDAV Module")
         
         try:
-            from esp_uart_filebridge.webdav import is_available
+            from esp_idf_uart_filebridge.webdav import is_available
             
             if is_available():
                 log_pass("WebDAV dependencies installed")
                 log_info("WebDAV server test requires manual verification")
-                log_info("Run: esp-file-bridge --port COM13 webdav")
+                log_info("Run: esp-idf-uart-filebridge --port COM13 webdav")
                 self.passed += 1
                 return True
             else:
                 log_warn("WebDAV dependencies not installed")
-                log_info("Install with: pip install esp-uart-filebridge[webdav]")
+                log_info("Install with: pip install esp-idf-uart-filebridge[webdav]")
                 self.skipped += 1
                 return False
         
@@ -518,10 +541,10 @@ class LiveTestRunner:
             self.skipped += 1
             return False
     
-    def run_all_tests(self, test_webdav=False):
+    def run_all_tests(self, test_webdav=False, test_noise=False):
         """Run all tests."""
         print(f"\n{Colors.HEADER}{Colors.BOLD}{'='*70}")
-        print(f"ESP-UART-FILEBRIDGE - COMPREHENSIVE TEST SUITE")
+        print(f"ESP-IDF-UART-FILEBRIDGE - COMPREHENSIVE TEST SUITE")
         print(f"{'='*70}{Colors.ENDC}\n")
         
         if not self.setup():
@@ -536,11 +559,13 @@ class LiveTestRunner:
             self.test_file_upload()
             self.test_file_download()
             self.test_file_hash()
+            self.test_file_overwrite()
             self.test_file_delete()
             self.test_directory_delete()
             self.test_streaming_upload()
             self.test_speed_benchmark()
-            self.test_noise_recovery()
+            if test_noise:
+                self.test_noise_recovery()
             self.test_stress_upload()
             
             # Optional WebDAV test
@@ -573,15 +598,16 @@ class LiveTestRunner:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Comprehensive test suite for esp-uart-filebridge")
+    parser = argparse.ArgumentParser(description="Comprehensive test suite for esp-idf-uart-filebridge")
     parser.add_argument("--port", "-p", required=True, help="Serial port (e.g., COM13, /dev/ttyUSB0)")
     parser.add_argument("--baud", "-b", type=int, default=3000000, help="Baud rate (default: 3000000)")
     parser.add_argument("--test-webdav", action="store_true", help="Test WebDAV functionality")
+    parser.add_argument("--test-noise", action="store_true", help="Inject UART noise (disruptive hardware test)")
     
     args = parser.parse_args()
     
     runner = LiveTestRunner(args.port, args.baud)
-    success = runner.run_all_tests(test_webdav=args.test_webdav)
+    success = runner.run_all_tests(test_webdav=args.test_webdav, test_noise=args.test_noise)
     
     sys.exit(0 if success else 1)
 

@@ -1,16 +1,16 @@
 ﻿#!/usr/bin/env python3
 """
-esp-file-bridge CLI - Command-line tool for esp-uart-filebridge.
+esp-idf-uart-filebridge CLI - Command-line tool for esp-idf-uart-filebridge.
 
 Usage:
-    esp-file-bridge ls /sd/ --port COM4
-    esp-file-bridge upload local_file.bin /sd/data/local_file.bin --port COM4
-    esp-file-bridge upload_dir ./local_directory /sd/data/ --port COM4
-    esp-file-bridge download /sd/log.txt ./log.txt --port COM4
-    esp-file-bridge delete /sd/old_file.bin --port COM4
-    esp-file-bridge mkdir /sd/new_dir --port COM4
-    esp-file-bridge format --port COM4
-    esp-file-bridge info --port COM4
+    esp-idf-uart-filebridge ls /sd/ --port COM4
+    esp-idf-uart-filebridge upload local_file.bin /sd/data/local_file.bin --port COM4
+    esp-idf-uart-filebridge upload_dir ./local_directory /sd/data/ --port COM4
+    esp-idf-uart-filebridge download /sd/log.txt ./log.txt --port COM4
+    esp-idf-uart-filebridge delete /sd/old_file.bin --port COM4
+    esp-idf-uart-filebridge mkdir /sd/new_dir --port COM4
+    esp-idf-uart-filebridge format --port COM4
+    esp-idf-uart-filebridge info --port COM4
 """
 
 import sys
@@ -24,8 +24,8 @@ log = logging.getLogger("esp_file_bridge.cli")
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="esp-file-bridge",
-        description="esp-uart-filebridge host tool"
+        prog="esp-idf-uart-filebridge",
+        description="esp-idf-uart-filebridge host tool"
     )
     parser.add_argument("--port", "-p", required=True, help="Serial port (e.g. COM4 or /dev/ttyUSB0)")
     parser.add_argument("--baud", "-b", type=int, default=3000000, help="Baud rate (default: 3000000)")
@@ -189,7 +189,7 @@ def main():
                 
                 if not is_available():
                     log.error("WebDAV dependencies not installed!")
-                    log.error("Install with: pip install esp-uart-filebridge[webdav]")
+                    log.error("Install with: pip install esp-idf-uart-filebridge[webdav]")
                     sys.exit(1)
                 
                 # Close the protocol connection (WebDAV server will create its own)
@@ -209,7 +209,7 @@ def main():
             
             except ImportError:
                 log.error("WebDAV module not found!")
-                log.error("Install with: pip install esp-uart-filebridge[webdav]")
+                log.error("Install with: pip install esp-idf-uart-filebridge[webdav]")
                 sys.exit(1)
 
     except ESP32ProtocolError as e:

@@ -1,5 +1,5 @@
 /*
- * esp-uart-filebridge - Filesystem Manager
+ * esp-idf-uart-filebridge - Filesystem Manager
  *
  * Internal implementation interface. This header is kept in the component
  * include tree because the implementation is split across translation units.

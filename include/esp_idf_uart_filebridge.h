@@ -83,7 +83,7 @@ typedef struct {
  *   4. Start background UART RX task
  *
  * @param cfg  Configuration. Must not be NULL. Use
- *             ESP_UART_FILEBRIDGE_CONFIG_DEFAULT() for sane defaults.
+ *             ESP_IDF_UART_FILEBRIDGE_CONFIG_DEFAULT() for sane defaults.
  * @return ESP_OK when the bridge starts. SD mount failure is non-fatal and
  *         makes file operations unavailable until storage is mounted.
  *         ESP_ERR_INVALID_ARG  if cfg is NULL

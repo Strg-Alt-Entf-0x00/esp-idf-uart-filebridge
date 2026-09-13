@@ -1,4 +1,4 @@
-﻿# esp-uart-filebridge
+﻿# esp-idf-uart-filebridge
 
 Universal ESP32 UART File Bridge - A highly optimized IDF Component for reliable file transfer between an ESP32 and a host PC over UART.
 
@@ -6,7 +6,7 @@ Universal ESP32 UART File Bridge - A highly optimized IDF Component for reliable
 
 In the ESP32 ecosystem, transferring large files and directory trees to an SD card usually involves WiFi (which can be slow or unreliable) or WebUSB/Native USB (which adds hardware and driver complexity).
 
-We built **esp-uart-filebridge** to provide a deterministic way to transfer arbitrary files and directory trees to an ESP32 filesystem without relying on a network stack.
+We built **esp-idf-uart-filebridge** to provide a deterministic way to transfer arbitrary files and directory trees to an ESP32 filesystem without relying on a network stack.
 
 UART is an ancient protocol, but when implemented correctly, it is **rock solid**. By using a high-quality USB-UART adapter (like the FT232R) with Hardware Flow Control (RTS/CTS) pushed to **3,000,000 Baud**, we achieved stable speeds that rival basic WiFi setups—without any of the software overhead.
 
@@ -55,7 +55,7 @@ This is a strong functional verification for the current firmware and host imple
 ## Repository Structure
 
 ```
-esp-uart-filebridge/
+esp-idf-uart-filebridge/
 ├── include/                       # Public API headers
 ├── src/                           # Component implementation
 │   └── internal/                  # Private implementation headers
@@ -67,10 +67,10 @@ esp-uart-filebridge/
 │       ├── main/
 │       ├── CMakeLists.txt
 │       └── sdkconfig.defaults
-├── python/                        # Python CLI and WebDAV tools
-│   ├── esp_uart_filebridge/
+├── tools_py/                      # Python CLI and WebDAV tools
+│   ├── esp_idf_uart_filebridge/
 │   ├── pyproject.toml
-│   └── test_all.py
+│   └── tests/
 └── README.md                      # This file
 ```
 
@@ -106,21 +106,21 @@ Add the component to your project's `main/idf_component.yml`:
 
 ```yaml
 dependencies:
-  Strg-Alt-Entf-0x00/esp-uart-filebridge:
-    git: https://github.com/Strg-Alt-Entf-0x00/esp-uart-filebridge.git
+  Strg-Alt-Entf-0x00/esp-idf-uart-filebridge:
+    git: https://github.com/Strg-Alt-Entf-0x00/esp-idf-uart-filebridge.git
 ```
 
 Then run: `idf.py update-dependencies`
 
-*(For local development, you can use `path: "../esp-uart-filebridge"` instead of `git`)*
+*(For local development, you can use `path: "../esp-idf-uart-filebridge"` instead of `git`)*
 
 ### 2. Initialize in Your Firmware
 
 ```c
-#include "esp_uart_filebridge.h"
+#include "esp_idf_uart_filebridge.h"
 
 // Initialize configuration with defaults
-esp_uart_filebridge_config_t cfg = ESP_UART_FILEBRIDGE_CONFIG_DEFAULT();
+esp_idf_uart_filebridge_config_t cfg = ESP_IDF_UART_FILEBRIDGE_CONFIG_DEFAULT();
 
 // Set your specific pins
 cfg.uart_num  = UART_NUM_1;
@@ -131,7 +131,7 @@ cfg.cts_pin   = 29;  // Required for high-speed reliability
 cfg.baud_rate = 3000000;
 
 // Start the background task
-ESP_ERROR_CHECK(esp_uart_filebridge_init(&cfg));
+ESP_ERROR_CHECK(esp_idf_uart_filebridge_init(&cfg));
 ```
 
 ### 3. Try the Example
@@ -146,10 +146,10 @@ idf.py build flash monitor
 Install the companion Python package:
 ```bash
 # Basic installation (CLI only)
-pip install -e ./python
+pip install -e ./tools_py
 
 # With WebDAV server support (optional)
-pip install -e "./python[webdav]"
+pip install -e "./tools_py[webdav]"
 ```
 
 ### 5. Choose Your Interface
@@ -157,22 +157,22 @@ pip install -e "./python[webdav]"
 **Option A: Command-Line Interface (Fast & Scriptable)**
 ```bash
 # Upload a file
-esp-file-bridge --port COM13 upload ./local_file.bin /sd/data/local_file.bin
+esp-idf-uart-filebridge --port COM13 upload ./local_file.bin /sd/data/local_file.bin
 
 # List SD card contents
-esp-file-bridge --port COM13 ls /sd/
+esp-idf-uart-filebridge --port COM13 ls /sd/
 
 # Download a file
-esp-file-bridge --port COM13 download /sd/log.txt ./log.txt
+esp-idf-uart-filebridge --port COM13 download /sd/log.txt ./log.txt
 
 # Upload entire directory, preserving its tree
-esp-file-bridge --port COM13 upload_dir ./local_directory /sd/data/
+esp-idf-uart-filebridge --port COM13 upload_dir ./local_directory /sd/data/
 ```
 
 **Option B: WebDAV Server (Drag & Drop in Explorer)** *(requires `[webdav]` extras)*
 ```bash
 # Start WebDAV server
-esp-file-bridge --port COM13 webdav
+esp-idf-uart-filebridge --port COM13 webdav
 
 # Windows: Opens as Z: drive automatically
 # Linux/Mac: Follow on-screen mount instructions
@@ -223,7 +223,7 @@ The WebDAV server provides a user-friendly way to access the ESP32 filesystem th
 ### Installation
 
 ```bash
-pip install -e "./python[webdav]"
+pip install -e "./tools_py[webdav]"
 ```
 
 This installs additional dependencies: `wsgidav`, `cheroot`, `pystray` (Windows), `pillow`
@@ -231,7 +231,7 @@ This installs additional dependencies: `wsgidav`, `cheroot`, `pystray` (Windows)
 ### Usage
 
 ```bash
-esp-file-bridge --port COM13 webdav
+esp-idf-uart-filebridge --port COM13 webdav
 ```
 
 **What happens:**
@@ -246,7 +246,7 @@ esp-file-bridge --port COM13 webdav
 **Windows:**
 ```cmd
 # Automatic (default)
-esp-file-bridge --port COM13 webdav
+esp-idf-uart-filebridge --port COM13 webdav
 
 # Manual mount
 net use Z: http://localhost:8080
@@ -271,7 +271,7 @@ sudo mount -t davfs http://localhost:8080 /mnt/esp32
 ### WebDAV Options
 
 ```bash
-esp-file-bridge --port COM13 webdav \
+esp-idf-uart-filebridge --port COM13 webdav \
   --host 127.0.0.1 \           # Server bind address
   --webdav-port 8080 \         # HTTP port
   --no-systray \               # Disable system tray (Windows)
@@ -306,7 +306,7 @@ When an AI agent is tasked with transferring files to the ESP32 using this bridg
 ### Vollständige Anleitung: Dateien zwischen PC und ESP32-SD-Karte kopieren
 
 **Voraussetzungen:**
-- ESP32-Firmware mit aktiviertem esp-uart-filebridge
+- ESP32-Firmware mit aktiviertem esp-idf-uart-filebridge
 - ESP32 über USB-UART mit dem PC verbunden (z.B. COM13)
 - SD-Karte im ESP32 eingelegt
 - UART-Verbindung: TX, RX, RTS, CTS und GND
@@ -316,7 +316,7 @@ When an AI agent is tasked with transferring files to the ESP32 using this bridg
 
 **1. In den Python-Ordner wechseln:**
 ```bash
-cd "managed_components/Strg-Alt-Entf-0x00__esp-uart-filebridge/python"
+cd "managed_components/Strg-Alt-Entf-0x00__esp-idf-uart-filebridge/tools_py"
 ```
 
 **2. Python-Abhängigkeiten installieren:**
@@ -326,58 +326,58 @@ py -3 -m pip install pyserial
 
 **3. Verbindung testen und Geräteinformationen anzeigen:**
 ```bash
-py -3 -m esp_uart_filebridge.cli --port COM13 info
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 info
 ```
 
 **4. Inhalt der SD-Karte anzeigen:**
 ```bash
-py -3 -m esp_uart_filebridge.cli --port COM13 ls /sd/
-py -3 -m esp_uart_filebridge.cli --port COM13 ls /sd/models/
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 ls /sd/
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 ls /sd/models/
 ```
 
 **5. Einen Ordner auf der SD-Karte erstellen:**
 ```bash
-py -3 -m esp_uart_filebridge.cli --port COM13 mkdir /sd/test
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 mkdir /sd/test
 ```
 
 **6. Datei vom PC auf die ESP32-SD-Karte kopieren:**
 ```bash
-py -3 -m esp_uart_filebridge.cli --port COM13 upload "D:\QUELLE\datei.bin" "/sd/test/datei.bin" --verify
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 upload "D:\QUELLE\datei.bin" "/sd/test/datei.bin" --verify
 ```
 
 **7. Datei von der ESP32-SD-Karte auf den PC kopieren:**
 ```bash
-py -3 -m esp_uart_filebridge.cli --port COM13 download "/sd/models/modell.bin" "D:\Temp\modell_kopie.bin"
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 download "/sd/models/modell.bin" "D:\Temp\modell_kopie.bin"
 ```
 
 **8. Einen kompletten Ordner vom PC auf die SD-Karte kopieren:**
 ```bash
-py -3 -m esp_uart_filebridge.cli --port COM13 upload_dir "D:\MeinOrdner" "/sd/meinordner"
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 upload_dir "D:\MeinOrdner" "/sd/meinordner"
 ```
 
 **9. Datei-Informationen anzeigen:**
 ```bash
-py -3 -m esp_uart_filebridge.cli --port COM13 stat /sd/models/modell.bin
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 stat /sd/models/modell.bin
 ```
 
 **10. CRC32-Prüfsumme einer Datei anzeigen:**
 ```bash
-py -3 -m esp_uart_filebridge.cli --port COM13 hash /sd/models/modell.bin
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 hash /sd/models/modell.bin
 ```
 
 **11. Datei oder Ordner löschen:**
 ```bash
-py -3 -m esp_uart_filebridge.cli --port COM13 delete /sd/test/datei.bin
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 delete /sd/test/datei.bin
 ```
 
 **12. Datei auf der SD-Karte umbenennen oder verschieben:**
 ```bash
-py -3 -m esp_uart_filebridge.cli --port COM13 rename "/sd/alt.bin" "/sd/neu.bin"
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 rename "/sd/alt.bin" "/sd/neu.bin"
 ```
 
 **13. Datei auf der SD-Karte kopieren:**
 ```bash
-py -3 -m esp_uart_filebridge.cli --port COM13 copy "/sd/alt.bin" "/sd/kopie.bin"
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 copy "/sd/alt.bin" "/sd/kopie.bin"
 ```
 
 

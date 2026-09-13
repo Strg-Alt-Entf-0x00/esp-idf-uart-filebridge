@@ -3,10 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "esp-uart-filebridge"
+name = "esp-idf-uart-filebridge"
 version = "1.0.0"
-description = "Host-side Python tools for esp-uart-filebridge IDF component"
-readme = "README.md"
+description = "Host-side Python tools for esp-idf-uart-filebridge IDF component"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
@@ -29,6 +28,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+test = [
+    "pytest>=8.0"
+]
 webdav = [
     "wsgidav>=4.0.0",
     "cheroot>=10.0.0",
@@ -37,12 +39,12 @@ webdav = [
 ]
 
 [project.scripts]
-esp-file-bridge = "esp_uart_filebridge.cli:main"
+esp-idf-uart-filebridge = "esp_idf_uart_filebridge.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/Strg-Alt-Entf-0x00/esp-uart-filebridge"
-Repository = "https://github.com/Strg-Alt-Entf-0x00/esp-uart-filebridge"
-Issues = "https://github.com/Strg-Alt-Entf-0x00/esp-uart-filebridge/issues"
+Homepage = "https://github.com/Strg-Alt-Entf-0x00/esp-idf-uart-filebridge"
+Repository = "https://github.com/Strg-Alt-Entf-0x00/esp-idf-uart-filebridge"
+Issues = "https://github.com/Strg-Alt-Entf-0x00/esp-idf-uart-filebridge/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]

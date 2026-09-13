@@ -112,12 +112,21 @@ class ESP32FileManager:
             relative_path = local_path.relative_to(root).as_posix()
             remote_path = f"{remote_dir.rstrip('/')}/{relative_path}"
             remote_parent = remote_path.rsplit("/", 1)[0]
-            if remote_parent not in created_directories:
-                self.create_directory(remote_parent, quiet=True)
-                created_directories.add(remote_parent)
+            self._ensure_remote_directory(remote_parent, created_directories)
             self.upload_file(local_path, remote_path, progress_callback)
             uploaded += 1
         return uploaded
+
+    def _ensure_remote_directory(self, remote_path: str, created_directories: set[str]) -> None:
+        current_path = ""
+        for index, component in enumerate(remote_path.strip("/").split("/")):
+            current_path += f"/{component}"
+            if index == 0:
+                created_directories.add(current_path)
+                continue
+            if current_path not in created_directories:
+                self.create_directory(current_path, quiet=True)
+                created_directories.add(current_path)
 
     def download_file(
         self,

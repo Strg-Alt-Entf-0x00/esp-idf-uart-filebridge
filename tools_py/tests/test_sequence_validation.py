@@ -1,10 +1,14 @@
 import binascii
 import struct
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 
-from esp_uart_filebridge.file_manager import ESP32FileManager
-from esp_uart_filebridge.protocol import (
+from esp_idf_uart_filebridge.file_manager import ESP32FileManager
+from esp_idf_uart_filebridge.protocol import (
     CMD_ACK,
     CMD_GET_FILE_DATA,
     CMD_GET_FILE_END,
@@ -137,3 +141,27 @@ def test_upload_failure_sends_abort_and_does_not_finish(tmp_path):
         ("data", b"abcd"),
         ("abort",),
     ] * 3
+
+
+def test_upload_directory_creates_nested_remote_directories(tmp_path):
+    source = tmp_path / "nested" / "level"
+    source.mkdir(parents=True)
+    (source / "payload.bin").write_bytes(b"payload")
+
+    class DirectoryProtocol:
+        chunk_size = 4
+
+        def __init__(self):
+            self.directories = []
+
+        def mkdir(self, path):
+            self.directories.append(path)
+
+    proto = DirectoryProtocol()
+    manager = ESP32FileManager(proto)
+    uploaded = []
+    manager.upload_file = lambda local, remote, progress_callback=None: uploaded.append((local, remote))
+
+    assert manager.upload_directory(source.parent.parent, "/sd/data") == 1
+    assert proto.directories == ["/sd/data", "/sd/data/nested", "/sd/data/nested/level"]
+    assert uploaded[0][1] == "/sd/data/nested/level/payload.bin"

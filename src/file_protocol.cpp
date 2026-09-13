@@ -13,9 +13,10 @@
 #include <cstring>
 #include <cstdio>
 #include <cerrno>
+#include <sys/stat.h>
 
 static const char* TAG = "file_protocol";
-static constexpr char UPLOAD_TEMP_SUFFIX[] = ".esp-uart-filebridge.part";
+static constexpr char UPLOAD_TEMP_SUFFIX[] = ".esp-idf-uart-filebridge.part";
 
 // Tags to suppress during file transfers for optimal performance
 // IMPORTANT: DO NOT suppress file_protocol itself - only I/O subsystems
@@ -876,6 +877,16 @@ void FileProtocol::handle_put_file_end() {
     }
 
     if (!m_benchmark_mode) {
+        struct stat existing_path;
+        if (stat(m_transfer_path, &existing_path) == 0) {
+            if (S_ISDIR(existing_path.st_mode) || unlink(m_transfer_path) != 0) {
+                ESP_LOGE(TAG, "Failed to replace existing upload target %s: errno=%d",
+                         m_transfer_path, errno);
+                abort_active_transfer();
+                send_error(ERR_IO_ERROR);
+                return;
+            }
+        }
         if (rename(m_transfer_temp_path, m_transfer_path) != 0) {
             ESP_LOGE(TAG, "Failed to commit upload %s: errno=%d", m_transfer_path, errno);
             abort_active_transfer();

@@ -74,7 +74,7 @@ class ESP32WebDAVServer:
         if not _CHEROOT_AVAILABLE:
             raise RuntimeError(
                 "WebDAV dependencies not installed. Install with:\n"
-                "  pip install esp-uart-filebridge[webdav]"
+                "  pip install esp-idf-uart-filebridge[webdav]"
             )
         
         self.port_name = port_name
@@ -288,7 +288,7 @@ class ESP32WebDAVServer:
     def run_with_systray(self):
         """Run server with system tray icon (Windows only)."""
         if not self.enable_systray or not _SYSTRAY_AVAILABLE:
-            raise RuntimeError("System tray not available. Install with: pip install esp-uart-filebridge[webdav]")
+            raise RuntimeError("System tray not available. Install with: pip install esp-idf-uart-filebridge[webdav]")
         
         # Start server in background thread
         self.server_thread = threading.Thread(target=self.start_webdav_server, daemon=True)

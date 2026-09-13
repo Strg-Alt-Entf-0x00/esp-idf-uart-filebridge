@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.16)
 
 idf_component_register(
     SRCS
-        "src/esp_uart_filebridge.cpp"
+        "src/esp_idf_uart_filebridge.cpp"
         "src/file_protocol.cpp"
         "src/filesystem_manager.cpp"
     INCLUDE_DIRS

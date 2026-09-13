@@ -1,5 +1,5 @@
 """
-WebDAV server module for esp-uart-filebridge.
+WebDAV server module for esp-idf-uart-filebridge.
 
 Provides a WebDAV interface to ESP32 filesystem, allowing users to mount
 the ESP32 SD card as a network drive for drag-and-drop file management.

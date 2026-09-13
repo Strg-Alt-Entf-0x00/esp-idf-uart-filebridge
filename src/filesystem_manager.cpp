@@ -1,5 +1,5 @@
 ﻿/*
- * esp-uart-filebridge - Filesystem Manager Implementation
+ * esp-idf-uart-filebridge - Filesystem Manager Implementation
  *
  * Multi-target SD card management via ESP-IDF SDMMC + VFS FAT.
  * ESP32-P4 LDO power control is guarded by CONFIG_UART_FILEBRIDGE_P4_LDO_ENABLE.
@@ -79,7 +79,7 @@ esp_err_t FilesystemManager::cleanup_partial_uploads_in_directory(const char* pa
     DIR* dir = opendir(path);
     if (!dir) return ESP_FAIL;
 
-    constexpr const char* suffix = ".esp-uart-filebridge.part";
+    constexpr const char* suffix = ".esp-idf-uart-filebridge.part";
     esp_err_t result = ESP_OK;
     struct dirent* entry;
     while ((entry = readdir(dir)) != nullptr) {
