@@ -313,11 +313,19 @@ esp_err_t FilesystemManager::delete_directory_recursive(const char *path) {
 esp_err_t FilesystemManager::rename_file(const char *old_path, const char *new_path) {
     if (validate_path(old_path) != ESP_OK || validate_path(new_path) != ESP_OK) return ESP_ERR_INVALID_ARG;
     if (strcmp(old_path, m_mount_point) == 0 || strcmp(new_path, m_mount_point) == 0) return ESP_ERR_INVALID_ARG;
+    struct stat st;
+    if (stat(new_path, &st) == 0) {
+        unlink(new_path);
+    }
     return (rename(old_path, new_path) == 0) ? ESP_OK : ESP_FAIL;
 }
 
 esp_err_t FilesystemManager::create_directory(const char *path) {
     if (validate_path(path) != ESP_OK || strcmp(path, m_mount_point) == 0) return ESP_ERR_INVALID_ARG;
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        return S_ISDIR(st.st_mode) ? ESP_OK : ESP_FAIL;
+    }
     return (mkdir(path, 0755) == 0) ? ESP_OK : ESP_FAIL;
 }
 
@@ -410,4 +418,6 @@ esp_err_t FilesystemManager::validate_path(const char *path) {
     }
     return ESP_OK;
 }
+
+
 
