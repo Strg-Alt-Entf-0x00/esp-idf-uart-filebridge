@@ -1,0 +1,41 @@
+{
+  "version": "1.0",
+  "description": "Simple JSON batch configuration",
+  "device": {
+    "port": "COM13",
+    "baud": 3000000
+  },
+  "variables": {
+    "project_root": "./my_project",
+    "models_path": "models"
+  },
+  "options": {
+    "verbose": true,
+    "progress_bar": true,
+    "fail_fast": true
+  },
+  "tasks": [
+    {
+      "name": "Create models directory",
+      "type": "mkdir",
+      "path": "/sd/models",
+      "parents": true,
+      "ignore_exists": true
+    },
+    {
+      "name": "Upload all models",
+      "type": "upload_dir",
+      "source": "${project_root}/${models_path}/",
+      "destination": "/sd/models/",
+      "pattern": "*.espdl",
+      "verify": true,
+      "overwrite": false,
+      "create_dirs": true
+    },
+    {
+      "name": "List uploaded models",
+      "type": "list",
+      "path": "/sd/models/"
+    }
+  ]
+}

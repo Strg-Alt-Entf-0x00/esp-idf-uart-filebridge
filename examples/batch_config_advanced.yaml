@@ -1,0 +1,133 @@
+# Advanced batch configuration with conditional execution and retry policies
+# Usage: esp-idf-uart-filebridge batch examples/batch_config_advanced.yaml
+
+version: "1.0"
+description: "Advanced batch with conditional execution, verification, and cleanup"
+
+device:
+  port: "COM13"  # Windows: COM13, Linux: /dev/ttyUSB0, macOS: /dev/cu.usbserial
+  baud: 3000000
+  timeout: 120
+
+variables:
+  models_dir: "./models"          # Path to your models directory
+  audio_dir: "./audio_samples"    # Path to your audio samples
+  remote_base: "/sd"              # SD card mount point
+  version: "v1.0"                 # Model version
+
+options:
+  verbose: true
+  progress_bar: true
+  fail_fast: false
+  error_policy: "retry"
+  default_retry:
+    max_attempts: 3
+    backoff_seconds: 2.0
+    exponential_backoff: true
+  state_file: ".batch_state.json"
+
+tasks:
+  # Check available space
+  - name: "Check available space"
+    type: "check_space"
+    required_bytes: 10485760  # 10 MB
+    mount_point: "/sd"
+
+  # Cleanup old files (conditional)
+  - name: "Cleanup old test files"
+    type: "delete"
+    path: "/sd/test_old"
+    recursive: true
+    ignore_missing: true
+    condition:
+      file_exists: "/sd/test_old"
+
+  # Create directory structure
+  - name: "Create models directory"
+    type: "mkdir"
+    path: "${remote_base}/models/${version}"
+    parents: true
+    ignore_exists: true
+
+  - name: "Create audio directory"
+    type: "mkdir"
+    path: "${remote_base}/audio/en"
+    parents: true
+    ignore_exists: true
+
+  # Upload models with verification
+  - name: "Upload encoder model"
+    type: "upload"
+    source: "${models_dir}/encoder.espdl"
+    destination: "${remote_base}/models/${version}/encoder.espdl"
+    verify: true
+    overwrite: false
+    condition:
+      file_not_exists: "${remote_base}/models/${version}/encoder.espdl"
+    retry:
+      max_attempts: 5
+      backoff_seconds: 3.0
+      exponential_backoff: true
+
+  - name: "Upload decoder model"
+    type: "upload"
+    source: "${models_dir}/decoder.espdl"
+    destination: "${remote_base}/models/${version}/decoder.espdl"
+    verify: true
+    overwrite: false
+    condition:
+      file_not_exists: "${remote_base}/models/${version}/decoder.espdl"
+
+  # Verify model hashes (example - update with real CRC32 values)
+  - name: "Verify encoder hash"
+    type: "check_hash"
+    path: "${remote_base}/models/${version}/encoder.espdl"
+    expected_hash: "0x12345678"
+    enabled: false  # Disabled by default (update with real CRC32)
+
+  # Upload audio files selectively
+  - name: "Upload English audio samples"
+    type: "upload_dir"
+    source: "${audio_dir}/en/"
+    destination: "${remote_base}/audio/en/"
+    pattern: "*.wav"
+    exclude:
+      - "*_backup*"
+      - "*_old*"
+      - "*.tmp"
+    verify: false
+    overwrite: false
+    create_dirs: true
+
+  # Create backup of existing config (if exists)
+  - name: "Backup existing config"
+    type: "copy"
+    source: "${remote_base}/config.json"
+    destination: "${remote_base}/config.json.backup"
+    condition:
+      file_exists: "${remote_base}/config.json"
+    enabled: false  # Disabled by default
+
+  # Upload new config
+  - name: "Upload configuration"
+    type: "upload"
+    source: "./config.json"
+    destination: "${remote_base}/config.json"
+    verify: false
+    overwrite: true
+
+  # Final verification
+  - name: "List uploaded models"
+    type: "list"
+    path: "${remote_base}/models/${version}/"
+
+  - name: "List uploaded audio"
+    type: "list"
+    path: "${remote_base}/audio/en/"
+
+  # Verify total size (example - update with real size)
+  - name: "Verify encoder size"
+    type: "verify_size"
+    path: "${remote_base}/models/${version}/encoder.espdl"
+    expected_size: 1048576  # Example: 1 MB (update with real size)
+    enabled: false  # Disabled by default

@@ -17,17 +17,101 @@ import sys
 import os
 import argparse
 import logging
+from pathlib import Path
 from .protocol import ESP32Protocol, ESP32ProtocolError
 from .file_manager import ESP32FileManager
 
 log = logging.getLogger("esp_file_bridge.cli")
+
+
+def handle_batch_command(args):
+    """Handle batch command execution."""
+    try:
+        import json
+        import yaml
+        from pydantic import ValidationError
+        from rich.console import Console
+        
+        from .batch_config import BatchConfig
+        from .batch_runner import BatchRunner
+        
+        console = Console()
+        
+        # Load config file
+        config_path = Path(args.config)
+        if not config_path.exists():
+            console.print(f"[red]Config file not found: {config_path}[/red]")
+            return 1
+        
+        # Parse config based on extension
+        config_text = config_path.read_text(encoding='utf-8')
+        
+        if config_path.suffix in ('.yaml', '.yml'):
+            config_dict = yaml.safe_load(config_text)
+        elif config_path.suffix == '.json':
+            config_dict = json.loads(config_text)
+        else:
+            console.print(f"[red]Unsupported config format: {config_path.suffix}[/red]")
+            console.print("Supported formats: .json, .yaml, .yml")
+            return 1
+        
+        # Override variables from command line
+        if args.var:
+            if 'variables' not in config_dict:
+                config_dict['variables'] = {}
+            for var_assignment in args.var:
+                if '=' not in var_assignment:
+                    console.print(f"[red]Invalid variable format: {var_assignment}[/red]")
+                    console.print("Use: -V KEY=VALUE")
+                    return 1
+                key, value = var_assignment.split('=', 1)
+                config_dict['variables'][key.strip()] = value.strip()
+        
+        # Override options
+        if args.dry_run:
+            if 'options' not in config_dict:
+                config_dict['options'] = {}
+            config_dict['options']['dry_run'] = True
+        
+        # Validate config with Pydantic
+        try:
+            config = BatchConfig(**config_dict)
+        except ValidationError as e:
+            console.print("[red]Configuration validation failed:[/red]")
+            console.print(e)
+            return 1
+        
+        # Create runner
+        runner = BatchRunner(config, console=console)
+        
+        # Handle state management
+        if args.clear_state:
+            runner.state.clear()
+            console.print("[yellow]Cleared previous execution state[/yellow]")
+        
+        if not args.resume:
+            runner.state.clear()
+        
+        # Execute batch
+        success = runner.execute()
+        
+        return 0 if success else 1
+        
+    except ImportError as e:
+        log.error(f"Missing dependencies for batch command: {e}")
+        log.error("Install with: pip install 'esp-idf-uart-filebridge[batch]'")
+        return 1
+    except Exception as e:
+        log.exception(f"Batch execution failed: {e}")
+        return 1
+
 
 def main():
     parser = argparse.ArgumentParser(
         prog="esp-idf-uart-filebridge",
         description="esp-idf-uart-filebridge host tool"
     )
-    parser.add_argument("--port", "-p", required=True, help="Serial port (e.g. COM4 or /dev/ttyUSB0)")
+    parser.add_argument("--port", "-p", help="Serial port (e.g. COM4 or /dev/ttyUSB0)")
     parser.add_argument("--baud", "-b", type=int, default=3000000, help="Baud rate (default: 3000000)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
 
@@ -81,7 +165,22 @@ def main():
     webdav_p.add_argument("--no-mount", action="store_true", help="Disable auto-mount (Windows)")
     webdav_p.add_argument("--drive", help="Drive letter for Windows (e.g. Z:)")
 
+    batch_p = sub.add_parser("batch", help="Execute batch configuration file (JSON/YAML)")
+    batch_p.add_argument("config", help="Path to batch configuration file (*.json, *.yaml, *.yml)")
+    batch_p.add_argument("--dry-run", action="store_true", help="Simulate execution without making changes")
+    batch_p.add_argument("--resume", action="store_true", help="Resume from previous execution state")
+    batch_p.add_argument("--clear-state", action="store_true", help="Clear previous execution state before running")
+    batch_p.add_argument("--var", "-V", action="append", metavar="KEY=VALUE", help="Override config variables (e.g., -V PORT=COM13)")
+
     args = parser.parse_args()
+
+    # Special handling for batch command (doesn't require --port in args, reads from config)
+    if args.command == "batch":
+        return handle_batch_command(args)
+
+    # All other commands require --port
+    if not args.port:
+        parser.error("the following arguments are required: --port/-p")
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,

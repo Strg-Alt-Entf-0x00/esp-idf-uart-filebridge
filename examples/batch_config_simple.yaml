@@ -1,0 +1,45 @@
+# Simple batch upload configuration example
+# Usage: esp-idf-uart-filebridge batch examples/batch_config_simple.yaml
+
+version: "1.0"
+description: "Upload models and audio files to ESP32"
+
+device:
+  port: "COM13"  # Change to your port (Windows: COM13, Linux: /dev/ttyUSB0)
+  baud: 3000000
+
+variables:
+  project_root: "./my_project"  # Change to your project path
+  lang: "en"
+
+options:
+  verbose: true
+  progress_bar: true
+  fail_fast: true
+
+tasks:
+  - name: "Create directories"
+    type: "mkdir"
+    path: "/sd/models"
+    parents: true
+    ignore_exists: true
+
+  - name: "Upload encoder model"
+    type: "upload"
+    source: "${project_root}/models/encoder.espdl"
+    destination: "/sd/models/encoder.espdl"
+    verify: true
+    overwrite: false
+
+  - name: "Upload audio samples"
+    type: "upload_dir"
+    source: "${project_root}/audio_samples/${lang}/"
+    destination: "/sd/audio/"
+    pattern: "*.wav"
+    verify: false
+    overwrite: false
+    create_dirs: true
+
+  - name: "Verify installation"
+    type: "list"
+    path: "/sd/models/"

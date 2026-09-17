@@ -63,15 +63,26 @@ esp-idf-uart-filebridge/
 ├── idf_component.yml
 ├── Kconfig
 ├── examples/
-│   └── basic_transfer/            # Complete working example
-│       ├── main/
-│       ├── CMakeLists.txt
-│       └── sdkconfig.defaults
-├── tools_py/                      # Python CLI and WebDAV tools
+│   ├── basic_transfer/            # Complete working example
+│   │   ├── main/
+│   │   ├── CMakeLists.txt
+│   │   └── sdkconfig.defaults
+│   ├── batch_config_simple.yaml   # Simple batch config example
+│   ├── batch_config_advanced.yaml # Advanced batch features
+│   └── batch_config_simple.json   # JSON format example
+├── tools_py/                      # Python CLI and batch tools
 │   ├── esp_idf_uart_filebridge/
+│   │   ├── batch_config.py        # Pydantic schemas (NEW)
+│   │   ├── batch_runner.py        # Execution engine (NEW)
+│   │   ├── cli.py                 # CLI with batch command
+│   │   ├── protocol.py            # UART protocol
+│   │   ├── file_manager.py        # High-level operations
+│   │   └── webdav/                # WebDAV server
+│   ├── generate_schema.py         # JSON Schema generator (NEW)
 │   ├── pyproject.toml
 │   └── tests/
-└── README.md                      # This file
+│       └── test_batch_config.py   # Batch system tests (NEW)
+└── README.md                      # This file (single source of truth)
 ```
 
 ---
@@ -82,10 +93,525 @@ esp-idf-uart-filebridge/
 - **Full filesystem operations:** upload, download, list, delete, rename, mkdir, copy, hash.
 - **Streaming upload** (no per-chunk ACK) with Hardware Flow Control (RTS/CTS) for maximum throughput.
 - **Log suppression** during transfers for optimal SD card write performance.
-- **Optional WebDAV server** for convenient local file management.
-- **Multi-target:** ESP32, ESP32-S3, ESP32-C6, ESP32-P4 (P4 LDO power control via Kconfig).
-- **Python CLI Tool** included out of the box.
-- **WebDAV Server** (optional) - Mount ESP32 as a local network drive for drag-and-drop file management.
+- **Batch System (NEW!)** - Declarative YAML/JSON workflows. Zero custom scripts needed!
+  - 11 task types (upload, upload_dir, download, delete, mkdir, rename, copy, check_hash, verify_size, list, check_space)
+  - Variable substitution (`${VAR}`)
+  - Conditional execution (skip if exists, verify hash, check space)
+  - Automatic retry with exponential backoff
+  - Progress tracking with Rich UI (progress bars, colors, panels)
+  - Resume support (state file tracking)
+  - Dry-run mode for testing
+  - AI-friendly (type-safe Pydantic schemas)
+- **Python CLI Tool** - Fast, scriptable commands for automation
+- **WebDAV Server** (optional) - Mount ESP32 as network drive for drag-and-drop file management
+- **Multi-target:** ESP32, ESP32-S3, ESP32-C6, ESP32-P4 (P4 LDO power control via Kconfig)
+
+---
+
+## Batch System - Declarative Workflows (No More Custom Scripts!)
+
+**Problem:** Every project needs custom Python scripts: `upload_models.py`, `upload_audio.py`, etc.  
+**Solution:** Define workflows in YAML/JSON config files. Perfect for AI agents and humans alike.
+
+### Installation
+
+```bash
+pip install -e "tools_py[batch]"
+```
+
+### Quick Example
+
+**upload_models.yaml:**
+```yaml
+version: "1.0"
+device:
+  port: "COM13"
+  baud: 3000000
+
+tasks:
+  - name: "Create directory"
+    type: "mkdir"
+    path: "/sd/models"
+    parents: true
+  
+  - name: "Upload ML models"
+    type: "upload_dir"
+    source: "./models/"
+    destination: "/sd/models/"
+    pattern: "*.espdl"
+    verify: true
+  
+  - name: "List uploaded files"
+    type: "list"
+    path: "/sd/models/"
+```
+
+**Execute:**
+```bash
+esp-idf-uart-filebridge batch upload_models.yaml
+```
+
+**Output:**
+```
+╭─────────────────────────────────╮
+│ Connected to ESP32-P4           │
+│ FW: 1.0.0 | SD: Yes             │
+╰─────────────────────────────────╯
+
+▶ Create directory (mkdir)
+✓ Created directory /sd/models
+
+▶ Upload ML models (upload_dir)
+⠹ Uploading ━━━━━━━━━━━━ 67% 2/3 files
+✓ Uploaded 3 files
+
+▶ List uploaded files (list)
+┏━━━━━━━━━━━━━━━┳━━━━━━┳━━━━━━━━━┓
+┃ Name          ┃ Type ┃ Size    ┃
+┡━━━━━━━━━━━━━━━╇━━━━━━╇━━━━━━━━━┩
+│ encoder.espdl │ FILE │ 524,288 │
+│ decoder.espdl │ FILE │ 262,144 │
+│ vocab.espdl   │ FILE │ 131,072 │
+└───────────────┴──────┴─────────┘
+
+╭─────────────────────────────────╮
+│ Total: 3 | Success: 3 | Failed: 0│
+│ Duration: 8.4s                  │
+╰─────────────────────────────────╯
+```
+
+### Supported Task Types (11 Total)
+
+| Task | Description | Example |
+|------|-------------|---------|
+| `upload` | Upload single file | `source: ./file.bin` → `/sd/file.bin` |
+| `upload_dir` | Upload directory recursively | With pattern filtering, exclude lists |
+| `download` | Download file from ESP32 | `/sd/log.txt` → `./logs/log.txt` |
+| `delete` | Delete file or directory | Supports recursive deletion |
+| `mkdir` | Create directory | With parent directory creation |
+| `rename` | Rename/move file or directory | `/sd/old.bin` → `/sd/new.bin` |
+| `copy` | Copy file on ESP32 | Remote-to-remote copy |
+| `check_hash` | Verify CRC32 hash | Ensure file integrity |
+| `verify_size` | Verify file size | Check expected size |
+| `list` | List directory contents | With recursive option |
+| `check_space` | Check available space | Ensure sufficient storage |
+
+### Key Features
+
+#### 1. Variable Substitution
+
+Define reusable configs with `${VAR}` placeholders:
+
+```yaml
+variables:
+  project: "./my_esp32_project"
+  version: "v2.1"
+  lang: "en"
+
+tasks:
+  - name: "Upload models"
+    type: "upload_dir"
+    source: "${project}/models/${version}/"
+    destination: "/sd/models/${version}/"
+```
+
+**Override from CLI:**
+```bash
+esp-idf-uart-filebridge batch config.yaml -V version=v3 -V lang=de
+```
+
+#### 2. Conditional Execution
+
+Skip tasks based on remote state:
+
+```yaml
+- name: "Upload only if missing"
+  type: "upload"
+  source: "./model.bin"
+  destination: "/sd/models/model.bin"
+  condition:
+    file_not_exists: "/sd/models/model.bin"
+```
+
+**Available Conditions:**
+- `file_exists: "/sd/path"` - Execute only if file exists
+- `file_not_exists: "/sd/path"` - Execute only if file doesn't exist
+- `hash_matches: "0x12345678"` - Execute only if CRC32 matches
+- `hash_differs: "0xABCDEF00"` - Execute only if CRC32 differs
+- `space_available: 10485760` - Execute only if space available (bytes)
+
+#### 3. Automatic Retry with Backoff
+
+```yaml
+options:
+  default_retry:
+    max_attempts: 5
+    backoff_seconds: 2.0
+    exponential_backoff: true  # 2s, 4s, 8s, 16s, 32s
+```
+
+**Per-task override:**
+```yaml
+- name: "Critical upload"
+  type: "upload"
+  source: "./firmware.bin"
+  destination: "/sd/firmware.bin"
+  retry:
+    max_attempts: 10
+    backoff_seconds: 3.0
+    exponential_backoff: true
+```
+
+#### 4. Resume Support
+
+State is tracked automatically. Resume after interruption:
+
+```bash
+# Start execution
+esp-idf-uart-filebridge batch config.yaml
+
+# If interrupted (Ctrl+C or error), resume:
+esp-idf-uart-filebridge batch config.yaml --resume
+
+# Clear state and start fresh:
+esp-idf-uart-filebridge batch config.yaml --clear-state
+```
+
+State file (`.batch_state.json`) tracks:
+- Completed tasks
+- Failed tasks
+- Start/end timestamps
+
+#### 5. Dry-Run Mode
+
+Test configurations without uploading:
+
+```bash
+esp-idf-uart-filebridge batch config.yaml --dry-run
+```
+
+Or in config:
+```yaml
+options:
+  dry_run: true
+```
+
+### Advanced Example: Complete ML Project Deployment
+
+**deploy_ml_project.yaml:**
+```yaml
+version: "1.0"
+description: "Deploy ML models, audio samples, and config to ESP32"
+
+device:
+  port: "COM13"  # Change to your port
+  baud: 3000000
+  timeout: 120
+
+variables:
+  project_root: "./my_project"              # Your project directory
+  models_dir: "models/output"               # Models subdirectory
+  audio_dir: "audio_samples/generated"      # Audio subdirectory
+  lang: "en"
+  version: "v2.1"
+
+options:
+  verbose: true
+  progress_bar: true
+  fail_fast: false
+  error_policy: "retry"
+  default_retry:
+    max_attempts: 3
+    backoff_seconds: 2.0
+    exponential_backoff: true
+  state_file: ".deploy_state.json"
+
+tasks:
+  # Pre-flight checks
+  - name: "Check available space"
+    type: "check_space"
+    required_bytes: 20971520  # 20 MB
+    mount_point: "/sd"
+  
+  # Cleanup old files
+  - name: "Remove old test files"
+    type: "delete"
+    path: "/sd/test_old"
+    recursive: true
+    ignore_missing: true
+    condition:
+      file_exists: "/sd/test_old"
+  
+  # Create directory structure
+  - name: "Create models directory"
+    type: "mkdir"
+    path: "/sd/models/${version}"
+    parents: true
+    ignore_exists: true
+  
+  - name: "Create audio directory"
+    type: "mkdir"
+    path: "/sd/audio/${lang}"
+    parents: true
+    ignore_exists: true
+  
+  # Upload models with verification
+  - name: "Upload encoder model"
+    type: "upload"
+    source: "${project_root}/${models_dir}/encoder.espdl"
+    destination: "/sd/models/${version}/encoder.espdl"
+    verify: true
+    overwrite: false
+    condition:
+      file_not_exists: "/sd/models/${version}/encoder.espdl"
+  
+  - name: "Upload decoder model"
+    type: "upload"
+    source: "${project_root}/${models_dir}/decoder.espdl"
+    destination: "/sd/models/${version}/decoder.espdl"
+    verify: true
+    overwrite: false
+    condition:
+      file_not_exists: "/sd/models/${version}/decoder.espdl"
+  
+  # Upload audio samples with filtering
+  - name: "Upload audio samples"
+    type: "upload_dir"
+    source: "${project_root}/${audio_dir}/${lang}/"
+    destination: "/sd/audio/${lang}/"
+    pattern: "*.wav"
+    exclude:
+      - "*_backup*"
+      - "*_old*"
+      - "*.tmp"
+    verify: false
+    overwrite: false
+    create_dirs: true
+  
+  # Backup and upload config
+  - name: "Backup existing config"
+    type: "copy"
+    source: "/sd/config.json"
+    destination: "/sd/config.json.backup"
+    condition:
+      file_exists: "/sd/config.json"
+  
+  - name: "Upload new config"
+    type: "upload"
+    source: "${project_root}/config.json"
+    destination: "/sd/config.json"
+    verify: false
+    overwrite: true
+  
+  # Verification
+  - name: "List uploaded models"
+    type: "list"
+    path: "/sd/models/${version}/"
+  
+  - name: "List uploaded audio"
+    type: "list"
+    path: "/sd/audio/${lang}/"
+  
+  # Optional: Verify model integrity
+  - name: "Verify encoder hash"
+    type: "check_hash"
+    path: "/sd/models/${version}/encoder.espdl"
+    expected_hash: "0x12345678"
+    enabled: false  # Disabled by default (update with real CRC32)
+```
+
+**Execute:**
+```bash
+esp-idf-uart-filebridge batch deploy_ml_project.yaml
+```
+
+**With variable overrides:**
+```bash
+esp-idf-uart-filebridge batch deploy_ml_project.yaml \
+  -V version=v2.2 \
+  -V lang=de \
+  -V project_root=/path/to/backup/project
+```
+
+### Error Handling Strategies
+
+Control how errors are handled:
+
+```yaml
+options:
+  fail_fast: true           # Stop on first error (default)
+  error_policy: "stop"      # stop, continue, retry
+```
+
+**Error Policies:**
+- `stop` - Stop execution on first error
+- `continue` - Continue to next task on error
+- `retry` - Retry failed task (respects retry policy)
+
+### JSON Schema & IDE Support
+
+Generate JSON Schema for IDE autocomplete:
+
+```bash
+cd tools_py
+python generate_schema.py > batch_config_schema.json
+```
+
+**VS Code Configuration (`.vscode/settings.json`):**
+```json
+{
+  "yaml.schemas": {
+    "./tools_py/batch_config_schema.json": [
+      "**/batch_*.yaml",
+      "**/batch_*.yml"
+    ]
+  }
+}
+```
+
+Now VS Code provides autocomplete, validation, and inline documentation while editing configs!
+
+### JSON Format Alternative
+
+Prefer JSON? Same features, different syntax:
+
+**upload_models.json:**
+```json
+{
+  "version": "1.0",
+  "device": {
+    "port": "COM13",
+    "baud": 3000000
+  },
+  "variables": {
+    "project": "D:/my_project"
+  },
+  "tasks": [
+    {
+      "name": "Upload models",
+      "type": "upload_dir",
+      "source": "${project}/models/",
+      "destination": "/sd/models/",
+      "verify": true
+    }
+  ]
+}
+```
+
+### AI Agent Integration
+
+The batch system is designed for seamless AI integration:
+
+**AI Workflow:**
+1. **User:** "Upload my ML models to the ESP32"
+2. **AI generates config:**
+```yaml
+version: "1.0"
+device:
+  port: "COM13"
+tasks:
+  - name: "Upload models"
+    type: "upload_dir"
+    source: "./models/"
+    destination: "/sd/models/"
+    verify: true
+```
+3. **AI executes:** `esp-idf-uart-filebridge batch config.yaml`
+4. **AI responds:** "✓ Successfully uploaded 3 models to /sd/models/"
+
+**No custom Python script needed!** 🎉
+
+### Common Use Cases
+
+#### 1. Simple File Upload
+
+```yaml
+version: "1.0"
+device:
+  port: "COM13"
+tasks:
+  - name: "Upload firmware"
+    type: "upload"
+    source: "./firmware.bin"
+    destination: "/sd/firmware.bin"
+    verify: true
+```
+
+#### 2. Directory Upload with Filtering
+
+```yaml
+tasks:
+  - name: "Upload WAV files"
+    type: "upload_dir"
+    source: "./audio_samples/"
+    destination: "/sd/audio/"
+    pattern: "*.wav"
+    exclude: ["*_test*", "*.tmp"]
+```
+
+#### 3. Conditional Update
+
+```yaml
+tasks:
+  - name: "Update model if different"
+    type: "upload"
+    source: "./model.bin"
+    destination: "/sd/models/model.bin"
+    condition:
+      hash_differs: "0xABCDEF00"  # Upload only if hash differs
+```
+
+#### 4. Multi-Step Deployment
+
+```yaml
+tasks:
+  - name: "Check space"
+    type: "check_space"
+    required_bytes: 10485760
+  
+  - name: "Create directories"
+    type: "mkdir"
+    path: "/sd/deploy"
+  
+  - name: "Upload files"
+    type: "upload_dir"
+    source: "./dist/"
+    destination: "/sd/deploy/"
+  
+  - name: "Verify"
+    type: "list"
+    path: "/sd/deploy/"
+```
+
+### Troubleshooting
+
+**Config validation errors:**
+```bash
+esp-idf-uart-filebridge batch config.yaml --verbose
+```
+
+**Test without uploading:**
+```bash
+esp-idf-uart-filebridge batch config.yaml --dry-run
+```
+
+**Connection issues:**
+- Check port name (Windows: `COM13`, Linux: `/dev/ttyUSB0`)
+- Verify device is powered and connected
+- Ensure baud rate matches device config (default: 3000000)
+- Close other programs using the port (e.g., monitor)
+
+**Resume after interruption:**
+```bash
+esp-idf-uart-filebridge batch config.yaml --resume
+```
+
+### Examples
+
+See `examples/` directory for more configurations:
+- `batch_config_simple.yaml` - Basic upload example
+- `batch_config_advanced.yaml` - Advanced features (conditionals, retry, variables)
+- `batch_config_simple.json` - JSON format example
 
 ---
 
@@ -145,16 +671,40 @@ idf.py build flash monitor
 
 Install the companion Python package:
 ```bash
+# Navigate to tools directory
+cd tools_py
+
 # Basic installation (CLI only)
-pip install -e ./tools_py
+pip install -e .
+
+# With batch system support (YAML/JSON configs, progress bars)
+pip install -e ".[batch]"
 
 # With WebDAV server support (optional)
-pip install -e "./tools_py[webdav]"
+pip install -e ".[webdav]"
+
+# Install everything
+pip install -e ".[batch,webdav,test]"
 ```
 
-### 5. Choose Your Interface
+**Dependencies by feature:**
+- **Base CLI:** `pyserial>=3.5`
+- **Batch System:** `pydantic>=2.0`, `pyyaml>=6.0`, `rich>=13.0`
+- **WebDAV Server:** `wsgidav>=4.0`, `cheroot>=10.0`, `pillow>=10.0`
+- **Testing:** `pytest>=8.0`
 
-**Option A: Command-Line Interface (Fast & Scriptable)**
+### 5. Choose Your Workflow
+
+**Option A: Batch System (Declarative Workflows - Recommended for Automation)**
+
+Create a YAML config and execute:
+```bash
+esp-idf-uart-filebridge batch upload_config.yaml
+```
+
+See [Batch System](#batch-system---declarative-workflows-no-more-custom-scripts) section below for complete documentation.
+
+**Option B: Command-Line Interface (Fast & Scriptable)**
 ```bash
 # Upload a file
 esp-idf-uart-filebridge --port COM13 upload ./local_file.bin /sd/data/local_file.bin
@@ -169,7 +719,7 @@ esp-idf-uart-filebridge --port COM13 download /sd/log.txt ./log.txt
 esp-idf-uart-filebridge --port COM13 upload_dir ./local_directory /sd/data/
 ```
 
-**Option B: WebDAV Server (Drag & Drop in Explorer)** *(requires `[webdav]` extras)*
+**Option C: WebDAV Server (Drag & Drop in Explorer)** *(requires `[webdav]` extras)*
 ```bash
 # Start WebDAV server
 esp-idf-uart-filebridge --port COM13 webdav
@@ -279,16 +829,25 @@ esp-idf-uart-filebridge --port COM13 webdav \
   --drive Y:                   # Custom drive letter (Windows)
 ```
 
-### When to Use WebDAV vs CLI
+### When to Use Batch vs CLI vs WebDAV
 
-| Use Case | Recommended Tool |
-|----------|------------------|
-| Automation, CI/CD, scripts | **CLI** (faster, scriptable) |
-| Manual file management | **WebDAV** (drag & drop) |
-| Large batch uploads | **CLI** (progress tracking) |
-| Quick edits, browsing | **WebDAV** (visual) |
-| Embedded in applications | **CLI** (Python API) |
-| End-user deployment | **WebDAV** (user-friendly) |
+| Use Case | Recommended Tool | Why |
+|----------|------------------|-----|
+| **Automated deployment pipelines** | **Batch System** | Declarative, version-controlled, resumable |
+| **AI agent file management** | **Batch System** | No code generation, type-safe configs |
+| **CI/CD integration** | **Batch System** or **CLI** | Scriptable, exit codes, progress tracking |
+| **Conditional uploads** | **Batch System** | Built-in conditionals (skip if exists, verify hash) |
+| **Multi-step workflows** | **Batch System** | Retry policies, state tracking, rollback |
+| **Quick single file upload** | **CLI** | Fast, no config file needed |
+| **Manual file browsing** | **WebDAV** | Drag & drop, visual interface |
+| **Text file editing** | **WebDAV** | Direct editing in Explorer/Finder |
+| **Python script integration** | **CLI** (subprocess) | Easy subprocess calls |
+| **Complex logic** | **CLI** (Python API) | Direct protocol access |
+
+**Rule of thumb:**
+- **Batch System:** Any workflow you'll run more than once
+- **CLI:** One-off commands and Python scripting
+- **WebDAV:** Manual file management and browsing
 
 
 
@@ -298,10 +857,87 @@ This section serves as both a human tutorial and a strict set of rules for any A
 
 **AI SYSTEM RULES (CRITICAL):**
 When an AI agent is tasked with transferring files to the ESP32 using this bridge, it MUST follow these rules without experimenting:
-1. **Always use the CLI:** Never write custom python scripts or try to import the protocol relatively. Use the `cli.py` module as a subprocess.
-2. **Hardware Constraints:** The filebridge expects a baud rate of `3000000`. Do not assume the Kconfig default.
-3. **Mount Point:** The target ESP32 SD card is mounted at `/sd/`. All remote paths MUST start with `/sd/` (e.g. `/sd/models/`).
-4. **Port Conflicts:** The ESP32 monitor must not block the bridge's COM port. If a `Sync timeout` or `Access denied` occurs, the monitor on the other port might be causing a reset loop or blocking the port.
+1. **Prefer Batch System:** For any workflow with multiple steps or repeated execution, use the batch system (YAML/JSON configs). Only use direct CLI for simple one-off commands.
+2. **Never write custom scripts:** Do not write custom Python scripts that import the protocol. Use either:
+   - **Batch System:** `esp-idf-uart-filebridge batch config.yaml` (recommended for workflows)
+   - **CLI commands:** `esp-idf-uart-filebridge --port COM13 upload ...` (for single operations)
+3. **Hardware Constraints:** The filebridge expects a baud rate of `3000000`. Do not assume the Kconfig default.
+4. **Mount Point:** The target ESP32 SD card is mounted at `/sd/`. All remote paths MUST start with `/sd/` (e.g. `/sd/models/`).
+5. **Port Conflicts:** The ESP32 monitor must not block the bridge's COM port. If a `Sync timeout` or `Access denied` occurs, the monitor on the other port might be causing a reset loop or blocking the port.
+
+### When AI Should Use Batch System vs CLI
+
+**Use Batch System when:**
+- User asks to "deploy", "upload multiple files", "setup project", etc.
+- Workflow has multiple steps (create dirs, upload files, verify)
+- Task will be repeated (versioned configs > throwaway scripts)
+- User mentions "automation", "CI/CD", "deployment pipeline"
+- Complex logic needed (conditionals, retry, resume)
+
+**Use CLI when:**
+- Single file operation ("upload this file", "list directory")
+- Quick test or verification ("check if file exists")
+- User explicitly asks for CLI command
+
+**Example Decision Tree:**
+- "Upload my ML models" → **Batch System** (multiple files, likely repeated)
+- "Upload model.bin to /sd/" → **CLI** (single file, one-off)
+- "Deploy audio samples and models" → **Batch System** (multi-step workflow)
+- "List files in /sd/models/" → **CLI** (simple query)
+
+### Batch System Quick Reference for AI Agents
+
+**Generate config on-the-fly:**
+```python
+# AI creates config file
+config = """
+version: "1.0"
+device:
+  port: "COM13"
+tasks:
+  - name: "Upload models"
+    type: "upload_dir"
+    source: "./models/"
+    destination: "/sd/models/"
+    verify: true
+"""
+
+with open("upload_config.yaml", "w") as f:
+    f.write(config)
+
+# AI executes
+subprocess.run(["esp-idf-uart-filebridge", "batch", "upload_config.yaml"])
+```
+
+**Common task patterns:**
+```yaml
+# Upload directory with filtering
+- name: "Upload WAV files"
+  type: "upload_dir"
+  source: "./audio/"
+  destination: "/sd/audio/"
+  pattern: "*.wav"
+  verify: false
+
+# Upload only if file doesn't exist
+- name: "Upload config"
+  type: "upload"
+  source: "./config.json"
+  destination: "/sd/config.json"
+  condition:
+    file_not_exists: "/sd/config.json"
+
+# Create directory structure
+- name: "Setup directories"
+  type: "mkdir"
+  path: "/sd/models/v2"
+  parents: true
+
+# Check space before upload
+- name: "Verify space"
+  type: "check_space"
+  required_bytes: 10485760  # 10 MB
+```
 
 ### Complete Guide: Transfer Files Between a PC and an ESP32 SD Card
 
@@ -380,6 +1016,15 @@ py -3 -m esp_idf_uart_filebridge.cli --port COM13 rename "/sd/old.bin" "/sd/new.
 py -3 -m esp_idf_uart_filebridge.cli --port COM13 copy "/sd/old.bin" "/sd/copy.bin"
 ```
 
+**Installation:**
+```bash
+pip install -e "tools_py[batch]"
+```
+
+**Dependencies:**
+- `pydantic>=2.0` - Type-safe config validation
+- `pyyaml>=6.0` - YAML parsing
+- `rich>=13.0` - Beautiful terminal output
 
 ---
 
