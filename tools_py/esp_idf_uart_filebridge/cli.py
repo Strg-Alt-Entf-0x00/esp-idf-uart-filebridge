@@ -198,12 +198,22 @@ def main():
             info = manager.get_device_info()
             print(f"Device     : {info.device_name}")
             print(f"FW Version : {info.fw_version}")
-            print(f"SD Present : {'yes' if info.sd_present else 'no'}")
+            
+            # SD Card with better formatting  
             if info.sd_present:
-                sd_mb = info.sd_size / (1024 * 1024)
-                free_mb = info.sd_free / (1024 * 1024)
-                print(f"SD Size    : {sd_mb:.0f} MB (free: {free_mb:.0f} MB)")
-            print(f"Chunk Size : {info.optimal_chunk_size} bytes")
+                size_gb = info.sd_size / (1024**3)
+                free_gb = info.sd_free / (1024**3)
+                used_gb = size_gb - free_gb
+                percent_free = (free_gb / size_gb * 100) if size_gb > 0 else 0
+                
+                print(f"SD Card    : {size_gb:.1f} GB total")
+                print(f"  Free     : {free_gb:.1f} GB ({percent_free:.0f}%)")
+                print(f"  Used     : {used_gb:.1f} GB")
+            else:
+                print(f"SD Card    : Not detected")
+            
+            # Transfer settings
+            print(f"Chunk Size : {info.optimal_chunk_size // 1024} KB")
 
         elif args.command == "ls":
             entries = manager.list_directory(args.path)

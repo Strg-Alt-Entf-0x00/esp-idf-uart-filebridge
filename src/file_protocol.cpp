@@ -121,6 +121,28 @@ esp_err_t FileProtocol::send_error(ErrorCode error) {
     return send_frame(CMD_NACK, &payload, sizeof(payload));
 }
 
+esp_err_t FileProtocol::send_error_ex(ErrorCode error, const char* reason, uint64_t context_value) {
+    NackExtended nack = {};
+    nack.error_code = static_cast<uint8_t>(error);
+    
+    if (reason) {
+        strncpy(nack.reason, reason, sizeof(nack.reason) - 1);
+        nack.reason[sizeof(nack.reason) - 1] = '\0';  // Ensure null termination
+    } else {
+        nack.reason[0] = '\0';
+    }
+    
+    nack.context_value = context_value;
+    nack.heap_free = esp_get_free_heap_size();
+    nack.reserved = 0;
+    
+    // Log error for debugging
+    ESP_LOGE(TAG, "NACK: code=%d, reason='%s', context=%llu, heap=%u", 
+             error, nack.reason, nack.context_value, nack.heap_free);
+    
+    return send_frame(CMD_NACK, &nack, sizeof(nack));
+}
+
 esp_err_t FileProtocol::send_ack() {
     return send_frame(CMD_ACK, nullptr, 0);
 }
@@ -414,7 +436,33 @@ void FileProtocol::handle_device_info() {
     }
     
     DeviceInfo info = {};
-    strncpy(info.device_name, "ESP32-P4-FILEBRIDGE", sizeof(info.device_name));
+    
+    // Device name: Auto-detect chip type or use configured name
+    const char* cfg_name = CONFIG_UART_FILEBRIDGE_DEVICE_NAME;
+    if (strcmp(cfg_name, "AUTO") == 0) {
+        // Auto-detect from IDF_TARGET
+        #if CONFIG_IDF_TARGET_ESP32
+            strncpy(info.device_name, "ESP32-FILEBRIDGE", sizeof(info.device_name));
+        #elif CONFIG_IDF_TARGET_ESP32S2
+            strncpy(info.device_name, "ESP32-S2-FILEBRIDGE", sizeof(info.device_name));
+        #elif CONFIG_IDF_TARGET_ESP32S3
+            strncpy(info.device_name, "ESP32-S3-FILEBRIDGE", sizeof(info.device_name));
+        #elif CONFIG_IDF_TARGET_ESP32C3
+            strncpy(info.device_name, "ESP32-C3-FILEBRIDGE", sizeof(info.device_name));
+        #elif CONFIG_IDF_TARGET_ESP32C6
+            strncpy(info.device_name, "ESP32-C6-FILEBRIDGE", sizeof(info.device_name));
+        #elif CONFIG_IDF_TARGET_ESP32H2
+            strncpy(info.device_name, "ESP32-H2-FILEBRIDGE", sizeof(info.device_name));
+        #elif CONFIG_IDF_TARGET_ESP32P4
+            strncpy(info.device_name, "ESP32-P4-FILEBRIDGE", sizeof(info.device_name));
+        #else
+            strncpy(info.device_name, "ESP32-FILEBRIDGE", sizeof(info.device_name));
+        #endif
+    } else {
+        // Use custom configured name
+        strncpy(info.device_name, cfg_name, sizeof(info.device_name));
+    }
+    info.device_name[sizeof(info.device_name) - 1] = '\0';  // Ensure null-termination
     
     info.fw_version_major = 1;
     info.fw_version_minor = 0;
@@ -678,12 +726,12 @@ void FileProtocol::handle_get_file_begin(const uint8_t* payload, uint16_t length
 
 void FileProtocol::handle_put_file_begin(const uint8_t* payload, uint16_t length) {
     if (m_transfer_active) {
-        send_error(ERR_TRANSFER_ACTIVE);
+        send_error_ex(ERR_TRANSFER_ACTIVE, "Another transfer is already in progress", m_transfer_bytes);
         return;
     }
     
     if (!payload || length < sizeof(uint64_t) + 1) {
-        send_error(ERR_INVALID_PATH);
+        send_error_ex(ERR_INVALID_PATH, "Missing file size or path in upload request", length);
         return;
     }
     
@@ -693,7 +741,9 @@ void FileProtocol::handle_put_file_begin(const uint8_t* payload, uint16_t length
     const size_t path_capacity = length - sizeof(uint64_t);
     const size_t path_length = strnlen(path, path_capacity);
     if (path_length == path_capacity || path_length >= sizeof(m_transfer_path)) {
-        send_error(ERR_INVALID_PATH);
+        char msg[128];
+        snprintf(msg, sizeof(msg), "Path too long (%zu chars, max %zu)", path_length, sizeof(m_transfer_path) - 1);
+        send_error_ex(ERR_PATH_TOO_LONG, msg, path_length);
         return;
     }
     
@@ -702,7 +752,7 @@ void FileProtocol::handle_put_file_begin(const uint8_t* payload, uint16_t length
     m_transfer_path[path_length] = '\0';
 
     if (path_length + sizeof(UPLOAD_TEMP_SUFFIX) > sizeof(m_transfer_temp_path)) {
-        send_error(ERR_PATH_TOO_LONG);
+        send_error_ex(ERR_PATH_TOO_LONG, "Path + temp suffix exceeds limit", path_length + sizeof(UPLOAD_TEMP_SUFFIX));
         return;
     }
     memcpy(m_transfer_temp_path, m_transfer_path, path_length);
@@ -722,7 +772,7 @@ void FileProtocol::handle_put_file_begin(const uint8_t* payload, uint16_t length
     m_benchmark_mode = false;
 
     if (m_fs_manager->validate_path(m_transfer_path) != ESP_OK) {
-        send_error(ERR_INVALID_PATH);
+        send_error_ex(ERR_INVALID_PATH, "Path validation failed (invalid characters or format)", 0);
         return;
     }
     
@@ -745,9 +795,11 @@ void FileProtocol::handle_put_file_begin(const uint8_t* payload, uint16_t length
             uint64_t required_bytes = m_transfer_total + (m_transfer_total / 10);
             
             if (free_bytes < required_bytes) {
-                ESP_LOGE(TAG, "Insufficient space: need %llu bytes, have %llu bytes free", 
-                         required_bytes, free_bytes);
-                send_error(ERR_DISK_FULL);
+                char msg[128];
+                snprintf(msg, sizeof(msg), "SD card full: need %llu MB, have %llu MB free", 
+                         required_bytes / (1024*1024), free_bytes / (1024*1024));
+                ESP_LOGE(TAG, "%s", msg);
+                send_error_ex(ERR_DISK_FULL, msg, free_bytes);
                 return;
             }
             
@@ -760,8 +812,10 @@ void FileProtocol::handle_put_file_begin(const uint8_t* payload, uint16_t length
     // Open file for writing
     m_transfer_file = fopen(m_transfer_temp_path, "wb");
     if (!m_transfer_file) {
-        ESP_LOGE(TAG, "Failed to create temporary file: %s", m_transfer_temp_path);
-        send_error(ERR_IO_ERROR);
+        char msg[384];  // Increased from 128 to accommodate long paths (256) + errno message
+        snprintf(msg, sizeof(msg), "Failed to create file: %s (errno=%d)", m_transfer_temp_path, errno);
+        ESP_LOGE(TAG, "%s", msg);
+        send_error_ex(ERR_IO_ERROR, msg, errno);
         return;
     }
     
@@ -877,6 +931,10 @@ void FileProtocol::handle_put_file_end() {
     }
 
     if (!m_benchmark_mode) {
+        // CRITICAL: Give SD card time to finish physical writes before rename
+        // This prevents NACK on next upload when SD controller is still busy
+        vTaskDelay(pdMS_TO_TICKS(50));
+        
         struct stat existing_path;
         if (stat(m_transfer_path, &existing_path) == 0) {
             if (S_ISDIR(existing_path.st_mode) || unlink(m_transfer_path) != 0) {
@@ -893,6 +951,9 @@ void FileProtocol::handle_put_file_end() {
             send_error(ERR_IO_ERROR);
             return;
         }
+        
+        // Additional delay after rename to ensure SD filesystem updates complete
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
     
     m_transfer_active = false;

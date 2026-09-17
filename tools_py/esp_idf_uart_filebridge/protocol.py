@@ -55,9 +55,11 @@ def with_lock(f):
 
 
 class ESP32ProtocolError(Exception):
-    def __init__(self, message, error_code=0):
+    def __init__(self, message, error_code=0, context_value=0, heap_free=0):
         super().__init__(message)
         self.error_code = error_code
+        self.context_value = context_value
+        self.heap_free = heap_free
 
 
 class FileEntry:
@@ -286,20 +288,52 @@ class ESP32Protocol:
             return cmd == CMD_ACK
         return False
 
-    def _wait_ack_with_error(self, timeout_sec=2.0) -> tuple[bool, int]:
+    def _wait_ack_with_error(self, timeout_sec=2.0) -> tuple[bool, int, str]:
+        """Wait for ACK with extended error information.
+        Returns: (success, error_code, error_message)
+        """
         deadline = self._deadline(timeout_sec)
         while time.monotonic() < deadline:
             try:
                 cmd, payload = self._receive_frame(timeout_sec=max(0.05, min(0.5, deadline - time.monotonic())))
             except ESP32ProtocolError:
-                return False, 0
+                return False, 0, "Timeout"
             if cmd == CMD_PROGRESS:
                 continue
             if cmd == CMD_NACK:
-                err_code = payload[0] if payload else 0
-                return False, err_code
-            return cmd == CMD_ACK, 0
-        return False, 0
+                # Try to parse extended NACK (struct size: 1 + 128 + 8 + 4 + 4 = 145 bytes)
+                if len(payload) >= 145:
+                    # Extended NACK with context
+                    error_code = payload[0]
+                    reason = payload[1:129].split(b'\0', 1)[0].decode('utf-8', errors='replace')
+                    context_value = struct.unpack('<Q', payload[129:137])[0]
+                    heap_free = struct.unpack('<I', payload[137:141])[0]
+                    
+                    # Build detailed error message
+                    if reason:
+                        msg = reason
+                    else:
+                        msg = f"NACK error code {error_code}"
+                    
+                    # Add context information
+                    if error_code == 0x15:  # ERR_DISK_FULL
+                        msg += f" (SD free: {context_value / (1024*1024):.1f} MB)"
+                    elif error_code == 0x06:  # ERR_OUT_OF_MEMORY
+                        msg += f" (Heap free: {context_value} bytes)"
+                    elif error_code == 0x18:  # ERR_PATH_TOO_LONG
+                        msg += f" (Path length: {context_value})"
+                    
+                    msg += f" [Heap: {heap_free / 1024:.1f} KB]"
+                    
+                    return False, error_code, msg
+                elif len(payload) >= 1:
+                    # Legacy simple NACK
+                    error_code = payload[0]
+                    return False, error_code, f"NACK error code {error_code}"
+                else:
+                    return False, 0, "NACK without error code"
+            return cmd == CMD_ACK, 0, ""
+        return False, 0, "Timeout waiting for ACK"
 
     @with_lock
     def send_hello(self) -> bool:
@@ -412,8 +446,10 @@ class ESP32Protocol:
         path_bytes = path.encode('utf-8') + b'\0'
         payload = struct.pack('<Q', file_size) + path_bytes
         self._send_frame(CMD_PUT_FILE_BEGIN, payload)
-        if not self._wait_ack():
-            raise ESP32ProtocolError("NACK on PUT_FILE_BEGIN")
+        
+        success, error_code, error_msg = self._wait_ack_with_error()
+        if not success:
+            raise ESP32ProtocolError(error_msg or "NACK on PUT_FILE_BEGIN", error_code)
 
     @with_lock
     def write_stream_data(self, chunk: bytes):

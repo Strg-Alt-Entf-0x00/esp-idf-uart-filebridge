@@ -76,9 +76,18 @@ public:
                          uint8_t flags = FLAG_NONE);
 
     /**
-     * Send error response
+     * Send error response (simple)
      */
     esp_err_t send_error(ErrorCode error);
+
+    /**
+     * Send extended error response with context
+     * @param error Error code
+     * @param reason Human-readable error message (max 127 chars)
+     * @param context_value Context-specific value (free space, memory, etc.)
+     * @return ESP_OK on success
+     */
+    esp_err_t send_error_ex(ErrorCode error, const char* reason, uint64_t context_value = 0);
 
     /**
      * Send ACK response

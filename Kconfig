@@ -4,6 +4,17 @@
 
 menu "ESP UART File Bridge"
 
+    config UART_FILEBRIDGE_DEVICE_NAME
+        string "Device name (shown in CLI)"
+        default "AUTO"
+        help
+            Device identifier shown in CLI tool (e.g., "Connected to ESP32-P4-FILEBRIDGE").
+            Options:
+              "AUTO" - Auto-detect chip type (ESP32-FILEBRIDGE, ESP32-S3-FILEBRIDGE, ESP32-P4-FILEBRIDGE, etc.)
+              Custom string - Use your own device name (max 31 chars)
+            
+            Auto-detection uses IDF_TARGET (e.g., "esp32p4" → "ESP32-P4-FILEBRIDGE").
+
     config UART_FILEBRIDGE_NUM
         int "UART port number"
         default 1

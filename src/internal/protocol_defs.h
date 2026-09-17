@@ -102,6 +102,19 @@ struct TransferProgress {
     uint8_t  reserved[2];
 };
 
+// Extended NACK Response (with context)
+struct NackExtended {
+    uint8_t  error_code;            // ErrorCode enum value
+    char     reason[128];           // Human-readable error message
+    uint64_t context_value;         // Context-dependent value:
+                                    // - For ERR_DISK_FULL: free bytes
+                                    // - For ERR_OUT_OF_MEMORY: free heap
+                                    // - For ERR_PATH_TOO_LONG: path length
+                                    // - For ERR_FILE_NOT_FOUND: errno
+    uint32_t heap_free;             // Current free heap (for all errors)
+    uint32_t reserved;
+};
+
 #pragma pack(pop)
 
 // ============================================================================
