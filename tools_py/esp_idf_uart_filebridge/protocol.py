@@ -122,7 +122,7 @@ class ESP32Protocol:
                 port_name, 
                 baud_rate, 
                 timeout=1.0,
-                rtscts=True  # HW flow ctrl enabled
+                rtscts=False  # HW flow ctrl disabled
             )
             self.sequence = 0
             self._rx_sequence = None
