@@ -116,13 +116,16 @@ class ESP32Protocol:
         self.max_payload = PROTO_MAX_PAYLOAD
 
     @with_lock
-    def connect(self, port_name: str, baud_rate: int = 921600) -> bool:
+    def connect(self, port_name: str, baud_rate: int = 3000000) -> bool:
         try:
             self.ser = serial.Serial(
-                port_name, 
-                baud_rate, 
-                timeout=1.0,
-                rtscts=False  # HW flow ctrl disabled
+                port_name,
+                baud_rate,
+                timeout=0.5,
+                rtscts=True,
+                dsrdtr=False,
+                xonxoff=False,
+                write_timeout=5.0,
             )
             self.sequence = 0
             self._rx_sequence = None
