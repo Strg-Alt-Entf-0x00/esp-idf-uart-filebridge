@@ -10,7 +10,9 @@
 #include "filesystem_manager.h"
 
 #include <cstring>
+#include <new>
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/uart.h"
@@ -25,16 +27,60 @@ static FilesystemManager *s_fs_manager = nullptr;
 static TaskHandle_t       s_rx_task   = nullptr;
 static uart_port_t        s_uart_num  = UART_NUM_1;
 static bool               s_running   = false;
+static bool               s_runtime_ready = false;
+static esp_idf_uart_filebridge_config_t s_cfg = {};
 
-/* --------------------------------------------------------------------------
- * UART TX callback (C linkage, passed into FileProtocol)
- * -------------------------------------------------------------------------- */
 static esp_err_t uart_tx_cb(const uint8_t *data, size_t len) {
     int written = uart_write_bytes(s_uart_num, data, len);
     if (written < 0 || (size_t)written != len) {
         ESP_LOGE(TAG, "UART write error: expected %d wrote %d", (int)len, written);
         return ESP_FAIL;
     }
+    return ESP_OK;
+}
+
+static esp_err_t ensure_runtime_ready(void) {
+    if (s_runtime_ready) {
+        return ESP_OK;
+    }
+
+    if (!s_cfg.sd_mount_point) {
+        ESP_LOGE(TAG, "No config available for runtime startup");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_fs_manager = new (std::nothrow) FilesystemManager();
+    if (!s_fs_manager) {
+        ESP_LOGE(TAG, "FilesystemManager allocation failed");
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t ret = s_fs_manager->init(s_cfg.sd_mount_point, s_cfg.mount_sd_own);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Filesystem init returned: %s", esp_err_to_name(ret));
+    }
+
+    s_protocol = new (std::nothrow) FileProtocol();
+    if (!s_protocol) {
+        ESP_LOGE(TAG, "FileProtocol allocation failed");
+        delete s_fs_manager;
+        s_fs_manager = nullptr;
+        return ESP_ERR_NO_MEM;
+    }
+
+    ret = s_protocol->init(s_fs_manager);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "FileProtocol::init failed: %s", esp_err_to_name(ret));
+        delete s_protocol;
+        s_protocol = nullptr;
+        delete s_fs_manager;
+        s_fs_manager = nullptr;
+        return ret;
+    }
+
+    s_protocol->set_tx_callback(uart_tx_cb);
+    s_runtime_ready = true;
+    ESP_LOGI(TAG, "Runtime activated lazily (SD at %s)", s_cfg.sd_mount_point);
     return ESP_OK;
 }
 
@@ -55,7 +101,19 @@ static void uart_rx_task(void *arg) {
 
     while (1) {
         int len = uart_read_bytes(s_uart_num, rx_buf, buf_size, pdMS_TO_TICKS(100));
-        if (len > 0 && s_protocol) {
+        if (len > 0) {
+            if (!s_runtime_ready) {
+                size_t free_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+                ESP_LOGI(TAG, "Activating lazy runtime: SRAM free before = %u bytes", (unsigned)free_before);
+                esp_err_t init_ret = ensure_runtime_ready();
+                size_t free_after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+                ESP_LOGI(TAG, "Lazy runtime ready: SRAM free after = %u bytes, result=%s",
+                         (unsigned)free_after, esp_err_to_name(init_ret));
+                if (init_ret != ESP_OK) {
+                    ESP_LOGE(TAG, "Lazy runtime activation failed: %s", esp_err_to_name(init_ret));
+                    continue;
+                }
+            }
             s_protocol->process_rx_data(rx_buf, (size_t)len);
         }
     }
@@ -84,6 +142,8 @@ esp_err_t esp_idf_uart_filebridge_init(const esp_idf_uart_filebridge_config_t *c
     }
 
     s_uart_num = cfg->uart_num;
+    s_cfg = *cfg;
+    s_runtime_ready = false;
 
     /* ------------------------------------------------------------------ */
     /* 1. Install UART driver                                              */
@@ -129,60 +189,19 @@ esp_err_t esp_idf_uart_filebridge_init(const esp_idf_uart_filebridge_config_t *c
              cfg->tx_pin, cfg->rx_pin, cfg->rts_pin, cfg->cts_pin);
 
     /* ------------------------------------------------------------------ */
-    /* 2. Filesystem Manager                                               */
-    /* ------------------------------------------------------------------ */
-    s_fs_manager = new FilesystemManager();
-    if (!s_fs_manager) {
-        ESP_LOGE(TAG, "FilesystemManager allocation failed");
-        uart_driver_delete(cfg->uart_num);
-        return ESP_ERR_NO_MEM;
-    }
-
-    ret = s_fs_manager->init(cfg->sd_mount_point, cfg->mount_sd_own);
-    if (ret != ESP_OK) {
-        /* Non-fatal warning already logged inside init() */
-        ESP_LOGW(TAG, "Filesystem init returned: %s", esp_err_to_name(ret));
-    }
-
-    /* ------------------------------------------------------------------ */
-    /* 3. File Protocol                                                    */
-    /* ------------------------------------------------------------------ */
-    s_protocol = new FileProtocol();
-    if (!s_protocol) {
-        ESP_LOGE(TAG, "FileProtocol allocation failed");
-        delete s_fs_manager;
-        s_fs_manager = nullptr;
-        uart_driver_delete(cfg->uart_num);
-        return ESP_ERR_NO_MEM;
-    }
-
-    ret = s_protocol->init(s_fs_manager);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "FileProtocol::init failed: %s", esp_err_to_name(ret));
-        delete s_protocol;   s_protocol   = nullptr;
-        delete s_fs_manager; s_fs_manager = nullptr;
-        uart_driver_delete(cfg->uart_num);
-        return ret;
-    }
-
-    s_protocol->set_tx_callback(uart_tx_cb);
-
-    /* ------------------------------------------------------------------ */
-    /* 4. Start RX Task                                                    */
+    /* 2. Start RX Task                                                    */
     /* ------------------------------------------------------------------ */
     BaseType_t rc = xTaskCreate(uart_rx_task, "uart_fb_rx",
                                 cfg->task_stack, NULL,
                                 cfg->task_priority, &s_rx_task);
     if (rc != pdPASS) {
         ESP_LOGE(TAG, "RX task creation failed");
-        delete s_protocol;   s_protocol   = nullptr;
-        delete s_fs_manager; s_fs_manager = nullptr;
         uart_driver_delete(cfg->uart_num);
         return ESP_ERR_NO_MEM;
     }
 
     s_running = true;
-    ESP_LOGI(TAG, "esp-idf-uart-filebridge initialized (SD at %s)", cfg->sd_mount_point);
+    ESP_LOGI(TAG, "esp-idf-uart-filebridge initialized in lazy mode (SD at %s)", cfg->sd_mount_point);
     return ESP_OK;
 }
 
@@ -204,6 +223,7 @@ esp_err_t esp_idf_uart_filebridge_deinit(void) {
         s_fs_manager = nullptr;
     }
 
+    s_runtime_ready = false;
     uart_driver_delete(s_uart_num);
     s_running = false;
     ESP_LOGI(TAG, "esp-idf-uart-filebridge deinitialized");
