@@ -485,9 +485,10 @@ class ESP32Protocol:
     def delete_file(self, path: str):
         path_bytes = path.encode('utf-8') + b'\0'
         self._send_frame(CMD_DELETE, path_bytes)
-        success, err_code = self._wait_ack_with_error()
+        success, err_code, err_msg = self._wait_ack_with_error()
         if not success:
-            raise ESP32ProtocolError(f"NACK on DELETE: {err_code}", error_code=err_code)
+            message = err_msg if err_msg else f"NACK on DELETE: {err_code}"
+            raise ESP32ProtocolError(message, error_code=err_code)
 
     @with_lock
     def mkdir(self, path: str):
@@ -502,9 +503,10 @@ class ESP32Protocol:
         payload = struct.pack('<B', fs_type)
         self._send_frame(CMD_FORMAT_FS, payload)
         # Formatting can take a long time, especially for SD cards
-        success, err_code = self._wait_ack_with_error(timeout_sec=30.0)
+        success, err_code, err_msg = self._wait_ack_with_error(timeout_sec=30.0)
         if not success:
-            raise ESP32ProtocolError(f"NACK or Timeout on FORMAT_FS: {err_code}", error_code=err_code)
+            message = err_msg if err_msg else f"NACK or Timeout on FORMAT_FS: {err_code}"
+            raise ESP32ProtocolError(message, error_code=err_code)
     
     @with_lock
     def get_file_hash(self, path: str) -> int:
