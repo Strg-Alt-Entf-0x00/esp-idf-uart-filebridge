@@ -1,4 +1,4 @@
-﻿/*
+/*
  * esp-idf-uart-filebridge - Top-Level Public API
  *
  * Single-call initialization for UART file bridge on ESP32.
@@ -106,6 +106,18 @@ esp_err_t esp_idf_uart_filebridge_deinit(void);
  * @return true if esp_idf_uart_filebridge_init() succeeded
  */
 bool esp_idf_uart_filebridge_is_running(void);
+
+/**
+ * Pause the UART RX task.
+ * @return ESP_OK always
+ */
+esp_err_t esp_idf_uart_filebridge_pause(void);
+
+/**
+ * Resume the UART RX task.
+ * @return ESP_OK always
+ */
+esp_err_t esp_idf_uart_filebridge_resume(void);
 
 #ifdef __cplusplus
 }

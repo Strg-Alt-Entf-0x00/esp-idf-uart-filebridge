@@ -1,4 +1,4 @@
-﻿/*
+/*
  * esp-idf-uart-filebridge - Top-Level Init/Deinit Implementation
  *
  * Wires together: UART driver, FilesystemManager, FileProtocol, RX task.
@@ -232,4 +232,18 @@ esp_err_t esp_idf_uart_filebridge_deinit(void) {
 
 bool esp_idf_uart_filebridge_is_running(void) {
     return s_running;
+}
+
+esp_err_t esp_idf_uart_filebridge_pause(void) {
+    if (s_rx_task) {
+        vTaskSuspend(s_rx_task);
+    }
+    return ESP_OK;
+}
+
+esp_err_t esp_idf_uart_filebridge_resume(void) {
+    if (s_rx_task) {
+        vTaskResume(s_rx_task);
+    }
+    return ESP_OK;
 }
