@@ -119,6 +119,20 @@ esp_err_t esp_idf_uart_filebridge_pause(void);
  */
 esp_err_t esp_idf_uart_filebridge_resume(void);
 
+/**
+ * @brief Force initialization of the SD card and filesystem.
+ * 
+ * Typically this is done lazily on the first incoming UART byte to save memory
+ * during early boot. Calling this manually allows other components (like TTS)
+ * to ensure the SD card is ready before accessing files on it.
+ * 
+ * @note Ensure the calling task has sufficient stack space (~6-8 KB) as SDMMC 
+ *       mounting can be stack-heavy.
+ * 
+ * @return ESP_OK on success, ESP_ERR_INVALID_STATE if bridge not initialized.
+ */
+esp_err_t esp_idf_uart_filebridge_mount_sd(void);
+
 #ifdef __cplusplus
 }
 #endif

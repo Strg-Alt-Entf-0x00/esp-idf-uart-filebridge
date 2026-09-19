@@ -44,14 +44,27 @@ static esp_err_t ensure_runtime_ready(void) {
         return ESP_OK;
     }
 
+    /* Lazy-init FilesystemManager + SD mount on first data arrival.
+     * This runs on the RX task stack (16 KB), NOT the main task stack (12 KB).
+     * esp_vfs_fat_sdmmc_mount is very stack-heavy and would overflow main. */
     if (!s_fs_manager) {
-        ESP_LOGE(TAG, "FilesystemManager not initialized");
-        return ESP_ERR_INVALID_STATE;
+        s_fs_manager = new (std::nothrow) FilesystemManager();
+        if (!s_fs_manager) {
+            ESP_LOGE(TAG, "FilesystemManager allocation failed");
+            return ESP_ERR_NO_MEM;
+        }
+
+        esp_err_t fs_ret = s_fs_manager->init(s_cfg.sd_mount_point, s_cfg.mount_sd_own);
+        if (fs_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Filesystem init returned: %s", esp_err_to_name(fs_ret));
+        }
     }
 
     s_protocol = new (std::nothrow) FileProtocol();
     if (!s_protocol) {
         ESP_LOGE(TAG, "FileProtocol allocation failed");
+        delete s_fs_manager;
+        s_fs_manager = nullptr;
         return ESP_ERR_NO_MEM;
     }
 
@@ -60,12 +73,14 @@ static esp_err_t ensure_runtime_ready(void) {
         ESP_LOGE(TAG, "FileProtocol::init failed: %s", esp_err_to_name(ret));
         delete s_protocol;
         s_protocol = nullptr;
+        delete s_fs_manager;
+        s_fs_manager = nullptr;
         return ret;
     }
 
     s_protocol->set_tx_callback(uart_tx_cb);
     s_runtime_ready = true;
-    ESP_LOGI(TAG, "Runtime Protocol activated lazily (SD at %s)", s_cfg.sd_mount_point);
+    ESP_LOGI(TAG, "Runtime activated lazily (SD at %s)", s_cfg.sd_mount_point);
     return ESP_OK;
 }
 
@@ -174,22 +189,7 @@ esp_err_t esp_idf_uart_filebridge_init(const esp_idf_uart_filebridge_config_t *c
              cfg->tx_pin, cfg->rx_pin, cfg->rts_pin, cfg->cts_pin);
 
     /* ------------------------------------------------------------------ */
-    /* 1.5 Filesystem Manager (must be immediate for SD card access)       */
-    /* ------------------------------------------------------------------ */
-    s_fs_manager = new (std::nothrow) FilesystemManager();
-    if (!s_fs_manager) {
-        ESP_LOGE(TAG, "FilesystemManager allocation failed");
-        uart_driver_delete(cfg->uart_num);
-        return ESP_ERR_NO_MEM;
-    }
-
-    ret = s_fs_manager->init(cfg->sd_mount_point, cfg->mount_sd_own);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Filesystem init returned: %s", esp_err_to_name(ret));
-    }
-
-    /* ------------------------------------------------------------------ */
-    /* 2. Start RX Task                                                    */
+    /* 2. Start RX Task (SD + Protocol init deferred to first RX data)     */
     /* ------------------------------------------------------------------ */
     BaseType_t rc = xTaskCreate(uart_rx_task, "uart_fb_rx",
                                 cfg->task_stack, NULL,
@@ -204,6 +204,7 @@ esp_err_t esp_idf_uart_filebridge_init(const esp_idf_uart_filebridge_config_t *c
     ESP_LOGI(TAG, "esp-idf-uart-filebridge initialized in lazy mode (SD at %s)", cfg->sd_mount_point);
     return ESP_OK;
 }
+
 
 esp_err_t esp_idf_uart_filebridge_deinit(void) {
     if (!s_running) return ESP_OK;
@@ -246,4 +247,11 @@ esp_err_t esp_idf_uart_filebridge_resume(void) {
         vTaskResume(s_rx_task);
     }
     return ESP_OK;
+}
+
+extern "C" esp_err_t esp_idf_uart_filebridge_mount_sd(void) {
+    if (!s_running) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ensure_runtime_ready();
 }
