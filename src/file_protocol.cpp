@@ -1,4 +1,4 @@
-﻿/*
+/*
  * ESP32-P4 USB Bridge File Manager - File Protocol Implementation
  * Part 1: Core infrastructure and basic commands
  */
@@ -381,14 +381,6 @@ void FileProtocol::abort_active_transfer() {
         free(m_sd_write_buffer);
         m_sd_write_buffer = nullptr;
     }
-    
-    m_transfer_active = false;
-    m_transfer_bytes = 0;
-    m_transfer_total = 0;
-    m_transfer_path[0] = '\0';
-    m_transfer_temp_path[0] = '\0';
-    m_benchmark_mode = false;
-    restore_logs_if_needed();
     
     // Restore logs if we were in a transfer
     if (m_transfer_active) {

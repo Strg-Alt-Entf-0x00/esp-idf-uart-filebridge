@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Comprehensive test suite for esp-idf-uart-filebridge.
 
@@ -376,6 +376,76 @@ class LiveTestRunner:
             self.failed += 1
             return False
 
+    def test_rename_and_copy(self):
+        """Test file rename and copy operations."""
+        log_test("File Rename & Copy")
+        try:
+            original = f"{TEST_DIR}/original.txt"
+            renamed = f"{TEST_DIR}/renamed.txt"
+            copied = f"{TEST_DIR}/copied.txt"
+            content = b"Rename and copy test data"
+            
+            # Upload original
+            self.manager.upload_file_from_bytes(content, original)
+            
+            # Test Copy
+            log_info("Testing file copy...")
+            self.manager.copy_file(original, copied)
+            copied_content = self.manager.download_file_to_bytes(copied, quiet=True)
+            if copied_content != content:
+                raise AssertionError("Copied file content mismatch")
+            log_pass("File copied successfully")
+            
+            # Test Rename
+            log_info("Testing file rename...")
+            self.manager.rename_file(original, renamed)
+            renamed_content = self.manager.download_file_to_bytes(renamed, quiet=True)
+            if renamed_content != content:
+                raise AssertionError("Renamed file content mismatch")
+            
+            # Ensure original is gone
+            try:
+                self.manager.get_file_stat(original)
+                raise AssertionError("Original file still exists after rename!")
+            except ESP32ProtocolError:
+                pass  # Expected behavior
+                
+            log_pass("File renamed successfully")
+            
+            self.passed += 1
+            return True
+        except Exception as e:
+            log_fail(f"Failed: {e}")
+            self.failed += 1
+            return False
+
+    def test_error_handling(self):
+        """Test API error handling for edge cases."""
+        log_test("Error Handling (Edge Cases)")
+        try:
+            # 1. Download non-existent file
+            log_info("Testing download of missing file...")
+            try:
+                self.manager.download_file_to_bytes(f"{TEST_DIR}/does_not_exist.txt", quiet=True)
+                raise AssertionError("Did not raise error for missing file download")
+            except ESP32ProtocolError as e:
+                log_pass(f"Correctly caught missing file error: {e}")
+            
+            # 2. Stat non-existent file
+            log_info("Testing stat of missing file...")
+            try:
+                self.manager.get_file_stat(f"{TEST_DIR}/does_not_exist.txt")
+                raise AssertionError("Did not raise error for missing file stat")
+            except ESP32ProtocolError as e:
+                log_pass(f"Correctly caught missing file stat error")
+                
+            self.passed += 1
+            return True
+        except Exception as e:
+            log_fail(f"Failed: {e}")
+            self.failed += 1
+            return False
+
     def test_file_overwrite(self):
         """Test replacing an existing remote file."""
         log_test("File Overwrite")
@@ -562,6 +632,8 @@ class LiveTestRunner:
             self.test_file_overwrite()
             self.test_file_delete()
             self.test_directory_delete()
+            self.test_rename_and_copy()
+            self.test_error_handling()
             self.test_streaming_upload()
             self.test_speed_benchmark()
             if test_noise:

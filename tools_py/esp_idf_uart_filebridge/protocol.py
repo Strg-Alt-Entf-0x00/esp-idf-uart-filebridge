@@ -1,4 +1,4 @@
-﻿import serial
+import serial
 import serial.tools.list_ports
 import struct
 import binascii
@@ -214,8 +214,11 @@ class ESP32Protocol:
         frame.extend(struct.pack('<I', crc))
         
         # Send to ESP32 (single write for minimal latency)
-        self.ser.write(bytes(frame))
-        self.ser.flush()
+        try:
+            self.ser.write(bytes(frame))
+            self.ser.flush()
+        except serial.SerialTimeoutException as e:
+            raise ESP32ProtocolError(f"Serial write timeout: {e}")
 
     def _receive_frame(self, expected_cmd=None, timeout_sec=5.0):
         if not self.ser or not self.ser.is_open:
@@ -249,7 +252,7 @@ class ESP32Protocol:
         if length > 0:
             payload = self.ser.read(length)
             if len(payload) != length:
-                raise ESP32ProtocolError("Payload timeout")
+                raise ESP32ProtocolError(f"Incomplete payload (got {len(payload)}, expected {length})")
 
         crc_bytes = self.ser.read(4)
         if len(crc_bytes) != 4:

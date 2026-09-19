@@ -1,4 +1,4 @@
-﻿/*
+/*
  * esp-idf-uart-filebridge - Filesystem Manager Implementation
  *
  * Multi-target SD card management via ESP-IDF SDMMC + VFS FAT.
@@ -82,17 +82,24 @@ esp_err_t FilesystemManager::cleanup_partial_uploads_in_directory(const char* pa
     constexpr const char* suffix = ".esp-idf-uart-filebridge.part";
     esp_err_t result = ESP_OK;
     struct dirent* entry;
+    
+    // Use heap allocation for path to avoid stack overflow in recursion
+    char* full_path = (char*)malloc(512);
+    if (!full_path) {
+        closedir(dir);
+        return ESP_ERR_NO_MEM;
+    }
+
     while ((entry = readdir(dir)) != nullptr) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
 
         const size_t name_len = strlen(entry->d_name);
         const size_t path_len = strlen(path);
-        if (path_len + 1 + name_len >= 256) {
+        if (path_len + 1 + name_len >= 512) {
             result = ESP_FAIL;
             continue;
         }
 
-        char full_path[256];
         memcpy(full_path, path, path_len);
         full_path[path_len] = '/';
         memcpy(full_path + path_len + 1, entry->d_name, name_len + 1);
@@ -113,6 +120,7 @@ esp_err_t FilesystemManager::cleanup_partial_uploads_in_directory(const char* pa
         }
     }
 
+    free(full_path);
     closedir(dir);
     return result;
 }
@@ -238,10 +246,15 @@ esp_err_t FilesystemManager::list_directory(const char *path,
         return ESP_ERR_NOT_FOUND;
     }
 
+    char* full_path = (char*)malloc(512);
+    if (!full_path) {
+        closedir(dir);
+        return ESP_ERR_NO_MEM;
+    }
+
     struct dirent *entry;
     while ((entry = readdir(dir)) != nullptr) {
-        char full_path[512];
-        snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
+        snprintf(full_path, 512, "%s/%s", path, entry->d_name);
         struct stat st;
         if (stat(full_path, &st) == 0) {
             callback(entry->d_name, (uint64_t)st.st_size,
@@ -249,6 +262,7 @@ esp_err_t FilesystemManager::list_directory(const char *path,
         }
     }
 
+    free(full_path);
     closedir(dir);
     return ESP_OK;
 }
@@ -283,15 +297,20 @@ esp_err_t FilesystemManager::delete_directory_recursive(const char *path) {
     DIR *dir = opendir(path);
     if (!dir) return ESP_ERR_NOT_FOUND;
 
+    char* full_path = (char*)malloc(512);
+    if (!full_path) {
+        closedir(dir);
+        return ESP_ERR_NO_MEM;
+    }
+
     struct dirent *entry;
     esp_err_t result = ESP_OK;
 
     while ((entry = readdir(dir)) != nullptr) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
 
-        char full_path[512];
-        int len = snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
-        if (len >= (int)sizeof(full_path)) {
+        int len = snprintf(full_path, 512, "%s/%s", path, entry->d_name);
+        if (len >= 512) {
             result = ESP_ERR_INVALID_SIZE;
             continue;
         }
@@ -305,6 +324,7 @@ esp_err_t FilesystemManager::delete_directory_recursive(const char *path) {
         }
     }
 
+    free(full_path);
     closedir(dir);
     if (rmdir(path) != 0) return ESP_FAIL;
     return result;
@@ -339,17 +359,26 @@ esp_err_t FilesystemManager::copy_file(const char *src_path, const char *dst_pat
     FILE *dst = fopen(dst_path, "wb");
     if (!dst) { fclose(src); return ESP_FAIL; }
 
-    uint8_t buf[4096];
+    const size_t buf_size = 16 * 1024; // 16KB for faster SD I/O
+    uint8_t *buf = (uint8_t*)malloc(buf_size);
+    if (!buf) {
+        fclose(src);
+        fclose(dst);
+        unlink(dst_path);
+        return ESP_ERR_NO_MEM;
+    }
+
     size_t n;
     esp_err_t ret = ESP_OK;
 
-    while ((n = fread(buf, 1, sizeof(buf), src)) > 0) {
+    while ((n = fread(buf, 1, buf_size, src)) > 0) {
         if (fwrite(buf, 1, n, dst) != n) {
             ret = ESP_FAIL;
             break;
         }
     }
 
+    free(buf);
     fclose(src);
     fclose(dst);
     if (ret != ESP_OK) unlink(dst_path);
@@ -362,11 +391,17 @@ esp_err_t FilesystemManager::hash_file(const char *path, uint32_t *hash) {
     FILE *f = fopen(path, "rb");
     if (!f) return ESP_ERR_NOT_FOUND;
 
+    const size_t buf_size = 16 * 1024;
+    uint8_t *buf = (uint8_t*)malloc(buf_size);
+    if (!buf) {
+        fclose(f);
+        return ESP_ERR_NO_MEM;
+    }
+
     uint32_t crc = 0xFFFFFFFF;
-    uint8_t  buf[4096];
     size_t   n;
 
-    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+    while ((n = fread(buf, 1, buf_size, f)) > 0) {
         for (size_t i = 0; i < n; i++) {
             crc ^= buf[i];
             for (int j = 0; j < 8; j++) {
@@ -375,6 +410,7 @@ esp_err_t FilesystemManager::hash_file(const char *path, uint32_t *hash) {
         }
     }
 
+    free(buf);
     fclose(f);
     *hash = ~crc;
     return ESP_OK;
