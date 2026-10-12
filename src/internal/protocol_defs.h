@@ -157,6 +157,10 @@ enum CommandId : uint8_t {
     CMD_SPACE_INFO      = 0x50,     // Get filesystem space info
     CMD_HASH_FILE       = 0x51,     // Calculate file hash (CRC32)
     
+    // Storage Backend Commands (v2.0 Multi-Backend Support)
+    CMD_STORAGE_LIST    = 0x52,     // List all registered storage backends
+    CMD_STORAGE_INFO    = 0x53,     // Get detailed info for specific backend
+    
     // Advanced Features
     CMD_FORMAT_FS       = 0x60,     // Format filesystem (dangerous!)
     CMD_MOUNT           = 0x61,     // Mount filesystem

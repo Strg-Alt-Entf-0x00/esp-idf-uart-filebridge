@@ -1,18 +1,29 @@
-﻿build/
+﻿# Build directories
+build/
 build-*/
+
+# ESP-IDF managed components (auto-downloaded)
+managed_components/
+
+# ESP-IDF dependency lock files
 dependencies.lock
+
+# Python
 __pycache__/
 *.pyc
 *.egg-info/
 dist/
 .venv/
-# Keep development notes local, but version the storage backend design.
+
+# Development documentation (keep local, except specific files)
 .docs/*
 
 # IDE/Editor specific files
 .clangd
 .vscode/
+.cache/
 
 # ESP-IDF generated configuration
 sdkconfig
 sdkconfig.old
+sdkconfig.defaults.old

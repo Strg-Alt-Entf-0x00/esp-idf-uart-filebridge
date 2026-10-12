@@ -6,6 +6,7 @@ license: "Unlicense"
 
 dependencies:
   idf: ">=5.2.0"
+  joltwallet/littlefs: "^1.14.8"
 
 files:
   include:

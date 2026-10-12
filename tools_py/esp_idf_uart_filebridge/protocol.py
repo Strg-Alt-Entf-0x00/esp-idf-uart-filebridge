@@ -41,7 +41,12 @@ CMD_MKDIR           = 0x42
 CMD_COPY            = 0x43
 CMD_SPACE_INFO      = 0x50
 CMD_HASH_FILE       = 0x51
+CMD_STORAGE_LIST    = 0x52  # v2.0: List all storage backends
+CMD_STORAGE_INFO    = 0x53  # v2.0: Get backend details
 CMD_FORMAT_FS       = 0x60
+
+# Flags
+FLAG_COMPRESSED     = 0x01  # v2.0: Data is compressed
 
 ERR_FILE_NOT_FOUND = 0x12
 ERR_FILE_EXISTS = 0x13
@@ -80,6 +85,75 @@ class FileStat:
         self.timestamp = unpacked[1]
         self.is_directory = bool(unpacked[2])
         self.attributes = unpacked[3]
+
+
+class StorageBackendInfo:
+    """Storage backend information (v2.0 multi-backend support)."""
+    
+    # Storage types (must match C++ enum)
+    TYPE_SD_FAT = 0
+    TYPE_FLASH_FAT = 1
+    TYPE_LITTLEFS = 2
+    TYPE_SPIFFS = 3
+    TYPE_CUSTOM = 255
+    
+    TYPE_NAMES = {
+        TYPE_SD_FAT: "SD/FAT",
+        TYPE_FLASH_FAT: "Flash/FAT",
+        TYPE_LITTLEFS: "LittleFS",
+        TYPE_SPIFFS: "SPIFFS",
+        TYPE_CUSTOM: "Custom"
+    }
+    
+    # Capability flags (must match C++ enum)
+    CAP_MOUNT = 0x00000001
+    CAP_UNMOUNT = 0x00000002
+    CAP_FORMAT = 0x00000004
+    CAP_FILE_READ = 0x00000010
+    CAP_FILE_WRITE = 0x00000020
+    CAP_FILE_DELETE = 0x00000040
+    CAP_FILE_RENAME = 0x00000080
+    CAP_FILE_STAT = 0x00000100
+    CAP_FILE_COPY = 0x00000200
+    CAP_DIRECTORIES = 0x00001000
+    CAP_SPACE_INFO = 0x00002000
+    CAP_LARGE_FILES = 0x00010000
+    CAP_TIMESTAMPS = 0x00020000
+    CAP_FILE_HASH = 0x00040000
+    CAP_COMPRESSION = 0x00080000
+    
+    def __init__(self, data: bytes):
+        # struct StorageBackendInfo: char mount_point[64], uint8_t type, char type_name[32],
+        # uint32_t capabilities, uint8_t mounted, uint64_t total_bytes, uint64_t free_bytes
+        unpacked = struct.unpack('<64sB32sIBQQ', data[:121])
+        self.mount_point = unpacked[0].split(b'\0', 1)[0].decode('utf-8')
+        self.type = unpacked[1]
+        self.type_name = unpacked[2].split(b'\0', 1)[0].decode('utf-8')
+        self.capabilities = unpacked[3]
+        self.mounted = bool(unpacked[4])
+        self.total_bytes = unpacked[5]
+        self.free_bytes = unpacked[6]
+    
+    def has_capability(self, cap: int) -> bool:
+        """Check if backend has specific capability."""
+        return (self.capabilities & cap) != 0
+    
+    def get_used_bytes(self) -> int:
+        """Get used bytes."""
+        return self.total_bytes - self.free_bytes if self.total_bytes > 0 else 0
+    
+    def get_usage_percentage(self) -> float:
+        """Get usage percentage (0-100)."""
+        if self.total_bytes == 0:
+            return 0.0
+        return (self.get_used_bytes() / self.total_bytes) * 100.0
+    
+    def __str__(self):
+        status = "mounted" if self.mounted else "unmounted"
+        return (f"{self.mount_point} [{self.type_name}] {status}: "
+                f"{self.free_bytes // (1024*1024)} MB free of "
+                f"{self.total_bytes // (1024*1024)} MB total")
+
 
 class DeviceInfo:
     def __init__(self, data: bytes):
@@ -351,6 +425,42 @@ class ESP32Protocol:
         self._send_frame(CMD_DEVICE_INFO)
         cmd, payload = self._receive_frame(CMD_DEVICE_INFO)
         return DeviceInfo(payload)
+
+    @with_lock
+    def get_storage_list(self):
+        """Get list of all registered storage backends (v2.0).
+        
+        Returns:
+            list: List of StorageBackendInfo objects
+        """
+        self._send_frame(CMD_STORAGE_LIST)
+        self._wait_ack()
+        
+        backends = []
+        while True:
+            cmd, payload = self._receive_frame(timeout_sec=30.0)
+            if cmd == CMD_LIST_END:
+                break
+            elif cmd == CMD_LIST_ENTRY:
+                backends.append(StorageBackendInfo(payload))
+            elif cmd == CMD_NACK:
+                raise ESP32ProtocolError("NACK during storage list")
+        return backends
+
+    @with_lock
+    def get_storage_info(self, mount_point: str) -> StorageBackendInfo:
+        """Get detailed information for specific storage backend (v2.0).
+        
+        Args:
+            mount_point: Mount point of backend (e.g., "/sd", "/flash", "/littlefs")
+            
+        Returns:
+            StorageBackendInfo: Backend information
+        """
+        path_bytes = mount_point.encode('utf-8') + b'\0'
+        self._send_frame(CMD_STORAGE_INFO, path_bytes)
+        cmd, payload = self._receive_frame(CMD_STORAGE_INFO)
+        return StorageBackendInfo(payload)
 
     @with_lock
     def list_directory(self, path: str):

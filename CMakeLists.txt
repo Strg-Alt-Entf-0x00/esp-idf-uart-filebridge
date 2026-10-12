@@ -8,10 +8,17 @@ idf_component_register(
         "src/esp_idf_uart_filebridge.cpp"
         "src/file_protocol.cpp"
         "src/filesystem_manager.cpp"
+        "src/internal/storage_registry.cpp"
+        "src/internal/storage_manager.cpp"
+        "src/internal/compression.cpp"
+        "src/backends/storage_sd_fat.cpp"
+        "src/backends/storage_flash_fat.cpp"
+        "src/backends/storage_littlefs.cpp"
     INCLUDE_DIRS
         "include"
     PRIV_INCLUDE_DIRS
         "src/internal"
+        "src/backends"
     REQUIRES
         esp_driver_uart
     PRIV_REQUIRES
@@ -21,4 +28,8 @@ idf_component_register(
         vfs
         freertos
         log
+        esp_partition
+        wear_levelling
+        joltwallet__littlefs
+        esp_timer
 )

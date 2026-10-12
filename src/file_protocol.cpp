@@ -4,15 +4,16 @@
  */
 
 #include "file_protocol.h"
-#include "filesystem_manager.h"
+#include "storage_manager.h"
+#include "storage_backend.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_chip_info.h"
 #include "esp_psram.h"
-#include "sdmmc_cmd.h"
 #include <cstring>
 #include <cstdio>
 #include <cerrno>
+#include <unistd.h>
 #include <sys/stat.h>
 
 static const char* TAG = "file_protocol";
@@ -58,16 +59,16 @@ FileProtocol::~FileProtocol() {
     abort_active_transfer();
 }
 
-esp_err_t FileProtocol::init(FilesystemManager* fs_manager) {
+esp_err_t FileProtocol::init(StorageManager* storage_manager) {
     if (m_initialized) {
         return ESP_OK;
     }
     
-    if (!fs_manager) {
+    if (!storage_manager) {
         return ESP_ERR_INVALID_ARG;
     }
     
-    m_fs_manager = fs_manager;
+    m_storage_manager = storage_manager;
     m_initialized = true;
     
     return ESP_OK;
@@ -352,6 +353,14 @@ void FileProtocol::dispatch_command(const ProtocolHeader* header, const uint8_t*
             handle_format_fs(payload, header->length);
             break;
             
+        case CMD_STORAGE_LIST:
+            handle_storage_list();
+            break;
+            
+        case CMD_STORAGE_INFO:
+            handle_storage_info(payload, header->length);
+            break;
+            
         default:
             ESP_LOGW(TAG, "Unknown command: 0x%02X", header->cmd);
             send_error(ERR_UNKNOWN_CMD);
@@ -475,28 +484,23 @@ void FileProtocol::handle_device_info() {
     info.psram_free = 0;
     #endif
     
-    // SD card info
-    info.sd_present = m_fs_manager->is_sd_mounted() ? 1 : 0;
+    // SD card info (check if SD backend is registered and mounted)
+    StorageBackend* sd_backend = m_storage_manager->get_backend_by_mount("/sd");
+    info.sd_present = (sd_backend && sd_backend->is_mounted()) ? 1 : 0;
     
     if (info.sd_present) {
-        sdmmc_card_t* card = m_fs_manager->get_sd_card_info();
-        if (card) {
-            info.sd_size = ((uint64_t)card->csd.capacity) * card->csd.sector_size;
+        uint64_t sd_total = 0, sd_free = 0;
+        if (m_storage_manager->get_space_info("/sd", &sd_total, &sd_free) == ESP_OK) {
+            info.sd_size = sd_total;
+            info.sd_free = sd_free;
             
-            uint64_t sd_total = 0, sd_free = 0;
-            if (m_fs_manager->get_space_info(m_fs_manager->get_mount_point(), &sd_total, &sd_free) == ESP_OK) {
-                info.sd_free = sd_free;
-            }
-            
-            // Determine SD type (check if it's high capacity)
-            if (card->ocr & (1 << 30)) {  // CCS bit (Card Capacity Status)
-                if (info.sd_size > 32ULL * 1024 * 1024 * 1024) {
-                    info.sd_type = 4;  // SDXC
-                    strncpy(info.sd_fs_type, "exFAT", sizeof(info.sd_fs_type));
-                } else {
-                    info.sd_type = 3;  // SDHC
-                    strncpy(info.sd_fs_type, "FAT32", sizeof(info.sd_fs_type));
-                }
+            // Determine SD type based on capacity
+            if (info.sd_size > 32ULL * 1024 * 1024 * 1024) {
+                info.sd_type = 4;  // SDXC
+                strncpy(info.sd_fs_type, "exFAT", sizeof(info.sd_fs_type));
+            } else if (info.sd_size > 2ULL * 1024 * 1024 * 1024) {
+                info.sd_type = 3;  // SDHC
+                strncpy(info.sd_fs_type, "FAT32", sizeof(info.sd_fs_type));
             } else {
                 info.sd_type = 2;  // SDSC
                 strncpy(info.sd_fs_type, "FAT32", sizeof(info.sd_fs_type));
@@ -557,7 +561,7 @@ void FileProtocol::handle_list_begin(const uint8_t* payload, uint16_t length) {
         self->send_frame(CMD_LIST_ENTRY, &entry, sizeof(entry));
     };
     
-    esp_err_t ret = m_fs_manager->list_directory(path, callback, this);
+    esp_err_t ret = m_storage_manager->list_directory(path, callback, this);
     
     if (ret != ESP_OK) {
         send_error(ERR_FILE_NOT_FOUND);
@@ -580,7 +584,7 @@ void FileProtocol::handle_stat(const uint8_t* payload, uint16_t length) {
     FileStat stat_info = {};
     bool is_dir = false;
     
-    esp_err_t ret = m_fs_manager->stat_file(path, &stat_info.size, 
+    esp_err_t ret = m_storage_manager->stat_file(path, &stat_info.size, 
                                             &stat_info.timestamp, &is_dir);
     
     if (ret != ESP_OK) {
@@ -599,14 +603,14 @@ void FileProtocol::handle_space_info(const uint8_t* payload, uint16_t length) {
     }
     
     const char* path = reinterpret_cast<const char*>(payload);
-    if (m_fs_manager->validate_path(path) != ESP_OK) {
+    if (m_storage_manager->validate_path(path) != ESP_OK) {
         send_error(ERR_INVALID_PATH);
         return;
     }
     ESP_LOGD(TAG, "SPACE_INFO: %s", path);
     
     uint64_t total = 0, free = 0;
-    esp_err_t ret = m_fs_manager->get_space_info(path, &total, &free);
+    esp_err_t ret = m_storage_manager->get_space_info(path, &total, &free);
     
     if (ret != ESP_OK) {
         send_error(ERR_FS_NOT_MOUNTED);
@@ -642,7 +646,7 @@ void FileProtocol::handle_get_file_begin(const uint8_t* payload, uint16_t length
     }
     
     const char* path = reinterpret_cast<const char*>(payload);
-    if (m_fs_manager->validate_path(path) != ESP_OK) {
+    if (m_storage_manager->validate_path(path) != ESP_OK) {
         send_error(ERR_INVALID_PATH);
         return;
     }
@@ -763,7 +767,7 @@ void FileProtocol::handle_put_file_begin(const uint8_t* payload, uint16_t length
     }
     m_benchmark_mode = false;
 
-    if (m_fs_manager->validate_path(m_transfer_path) != ESP_OK) {
+    if (m_storage_manager->validate_path(m_transfer_path) != ESP_OK) {
         send_error_ex(ERR_INVALID_PATH, "Path validation failed (invalid characters or format)", 0);
         return;
     }
@@ -780,7 +784,7 @@ void FileProtocol::handle_put_file_begin(const uint8_t* payload, uint16_t length
     if (mount_point) {
         uint64_t total_bytes = 0;
         uint64_t free_bytes = 0;
-        esp_err_t ret = m_fs_manager->get_space_info(mount_point, &total_bytes, &free_bytes);
+        esp_err_t ret = m_storage_manager->get_space_info(mount_point, &total_bytes, &free_bytes);
         
         if (ret == ESP_OK) {
             // Add 10% safety margin for filesystem overhead
@@ -986,7 +990,7 @@ void FileProtocol::handle_delete(const uint8_t* payload, uint16_t length) {
     const char* path = reinterpret_cast<const char*>(payload);
     ESP_LOGI(TAG, "DELETE: %s", path);
     
-    esp_err_t ret = m_fs_manager->delete_file(path);
+    esp_err_t ret = m_storage_manager->delete_file(path);
     
     if (ret == ESP_OK) {
         send_ack();
@@ -1027,7 +1031,7 @@ void FileProtocol::handle_rename(const uint8_t* payload, uint16_t length) {
     
     ESP_LOGI(TAG, "RENAME: %s -> %s", old_path, new_path);
     
-    esp_err_t ret = m_fs_manager->rename_file(old_path, new_path);
+    esp_err_t ret = m_storage_manager->rename_file(old_path, new_path);
     
     if (ret == ESP_OK) {
         send_ack();
@@ -1052,7 +1056,7 @@ void FileProtocol::handle_mkdir(const uint8_t* payload, uint16_t length) {
     const char* path = reinterpret_cast<const char*>(payload);
     ESP_LOGI(TAG, "MKDIR: %s", path);
     
-    esp_err_t ret = m_fs_manager->create_directory(path);
+    esp_err_t ret = m_storage_manager->create_directory(path);
     
     if (ret == ESP_OK) {
         send_ack();
@@ -1084,7 +1088,7 @@ void FileProtocol::handle_copy(const uint8_t* payload, uint16_t length) {
     
     ESP_LOGI(TAG, "COPY: %s -> %s", src_path, dst_path);
     
-    esp_err_t ret = m_fs_manager->copy_file(src_path, dst_path);
+    esp_err_t ret = m_storage_manager->copy_file(src_path, dst_path);
     
     if (ret == ESP_OK) {
         send_ack();
@@ -1103,7 +1107,7 @@ void FileProtocol::handle_hash_file(const uint8_t* payload, uint16_t length) {
     ESP_LOGI(TAG, "HASH_FILE: %s", path);
     
     uint32_t hash = 0;
-    esp_err_t ret = m_fs_manager->hash_file(path, &hash);
+    esp_err_t ret = m_storage_manager->hash_file(path, &hash);
     
     if (ret == ESP_OK) {
         send_frame(CMD_HASH_FILE, &hash, sizeof(hash));
@@ -1129,7 +1133,16 @@ void FileProtocol::handle_format_fs(const uint8_t* payload, uint16_t length) {
     
     if (fs_type == FSTYPE_FAT32 || fs_type == FSTYPE_EXFAT) {
         ESP_LOGW(TAG, "Format requested for SD Card");
-        ret = m_fs_manager->format_sd();
+        
+        // Get SD backend and format it
+        StorageBackend* sd_backend = m_storage_manager->get_backend_by_mount("/sd");
+        if (sd_backend) {
+            ret = sd_backend->format();
+        } else {
+            ESP_LOGE(TAG, "SD backend not found");
+            send_error(ERR_FS_NOT_MOUNTED);
+            return;
+        }
     } else {
         ESP_LOGE(TAG, "Format requested for unknown FS type: %d", fs_type);
         send_error(ERR_INVALID_PATH);
@@ -1146,3 +1159,101 @@ void FileProtocol::handle_format_fs(const uint8_t* payload, uint16_t length) {
 
 
 
+
+
+// ============================================================================
+// Command Handlers - Storage Backend Discovery (v2.0)
+// ============================================================================
+
+void FileProtocol::handle_storage_list() {
+    ESP_LOGI(TAG, "STORAGE_LIST requested");
+    
+    // Send ACK first
+    send_ack();
+    
+    // Iterate through all registered backends
+    size_t backend_count = m_storage_manager->get_backend_count();
+    
+    for (size_t i = 0; i < backend_count; i++) {
+        StorageBackend* backend = m_storage_manager->get_backend(i);
+        if (!backend) {
+            continue;
+        }
+        
+        // Get backend info
+        StorageBackendInfo info = {};
+        if (backend->get_backend_info(&info) != ESP_OK) {
+            continue;
+        }
+        
+        // Manually serialize to ensure exact 118-byte layout for Python protocol
+        // Format: mount_point[64] + type(1) + type_name[32] + capabilities(4) + mounted(1) + total(8) + free(8)
+        uint8_t buffer[118];
+        memset(buffer, 0, sizeof(buffer));
+        
+        // Copy fields with exact offsets
+        memcpy(buffer + 0, info.mount_point, 64);      // Offset 0: mount_point[64]
+        buffer[64] = info.type;                         // Offset 64: type(1)
+        memcpy(buffer + 65, info.type_name, 32);       // Offset 65: type_name[32]
+        memcpy(buffer + 97, &info.capabilities, 4);    // Offset 97: capabilities(4)
+        buffer[101] = info.mounted;                    // Offset 101: mounted(1)
+        memcpy(buffer + 102, &info.total_bytes, 8);    // Offset 102: total_bytes(8)
+        memcpy(buffer + 110, &info.free_bytes, 8);     // Offset 110: free_bytes(8)
+        // Total: 64 + 1 + 32 + 4 + 1 + 8 + 8 = 118 bytes
+        
+        // Send as CMD_LIST_ENTRY (to match Python protocol expectations)
+        send_frame(CMD_LIST_ENTRY, buffer, 118);
+    }
+    
+    // Send end marker (empty frame)
+    send_frame(CMD_LIST_END, nullptr, 0);
+    
+    ESP_LOGI(TAG, "Sent %zu storage backends", backend_count);
+}
+
+void FileProtocol::handle_storage_info(const uint8_t* payload, uint16_t length) {
+    if (!payload || length == 0) {
+        send_error(ERR_INVALID_PATH);
+        return;
+    }
+    
+    // Payload is mount point string
+    const char* mount_point = reinterpret_cast<const char*>(payload);
+    ESP_LOGI(TAG, "STORAGE_INFO requested for: %s", mount_point);
+    
+    // Find backend by mount point
+    StorageBackend* backend = m_storage_manager->get_backend_by_mount(mount_point);
+    if (!backend) {
+        ESP_LOGE(TAG, "Backend not found: %s", mount_point);
+        send_error(ERR_FILE_NOT_FOUND);
+        return;
+    }
+    
+    // Get backend info
+    StorageBackendInfo info = {};
+    esp_err_t ret = backend->get_backend_info(&info);
+    
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get backend info: %s", esp_err_to_name(ret));
+        send_error(ERR_IO_ERROR);
+        return;
+    }
+    
+    // Manually serialize to ensure exact 118-byte layout for Python protocol
+    // Format: mount_point[64] + type(1) + type_name[32] + capabilities(4) + mounted(1) + total(8) + free(8)
+    uint8_t buffer[118];
+    memset(buffer, 0, sizeof(buffer));
+    
+    // Copy fields with exact offsets
+    memcpy(buffer + 0, info.mount_point, 64);      // Offset 0: mount_point[64]
+    buffer[64] = info.type;                         // Offset 64: type(1)
+    memcpy(buffer + 65, info.type_name, 32);       // Offset 65: type_name[32]
+    memcpy(buffer + 97, &info.capabilities, 4);    // Offset 97: capabilities(4)
+    buffer[101] = info.mounted;                    // Offset 101: mounted(1)
+    memcpy(buffer + 102, &info.total_bytes, 8);    // Offset 102: total_bytes(8)
+    memcpy(buffer + 110, &info.free_bytes, 8);     // Offset 110: free_bytes(8)
+    // Total: 64 + 1 + 32 + 4 + 1 + 8 + 8 = 118 bytes
+    
+    // Send backend info
+    send_frame(CMD_STORAGE_INFO, buffer, 118);
+}

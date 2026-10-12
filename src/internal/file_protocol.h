@@ -15,7 +15,7 @@
 #include "freertos/queue.h"
 
 // Forward declarations
-class FilesystemManager;
+class StorageManager;
 
 /**
  * RAII class for temporarily suppressing logs during critical operations
@@ -52,10 +52,10 @@ public:
 
     /**
      * Initialize protocol handler
-     * @param fs_manager Pointer to filesystem manager instance
+     * @param storage_manager Pointer to storage manager instance
      * @return ESP_OK on success
      */
-    esp_err_t init(FilesystemManager* fs_manager);
+    esp_err_t init(StorageManager* storage_manager);
 
     /**
      * Process incoming data from USB CDC
@@ -113,7 +113,7 @@ public:
 private:
     // State
     bool m_initialized = false;
-    FilesystemManager* m_fs_manager = nullptr;
+    StorageManager* m_storage_manager = nullptr;
     bool m_log_suppression_enabled = true;  // Enabled by default for production
     
     // TX Callback
@@ -164,6 +164,9 @@ private:
     
     void handle_hash_file(const uint8_t* payload, uint16_t length);
     void handle_format_fs(const uint8_t* payload, uint16_t length);
+    
+    void handle_storage_list();
+    void handle_storage_info(const uint8_t* payload, uint16_t length);
     
     // Frame parsing
     void try_parse_frame();

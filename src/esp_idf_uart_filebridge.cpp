@@ -7,7 +7,7 @@
 
 #include "esp_idf_uart_filebridge.h"
 #include "file_protocol.h"
-#include "filesystem_manager.h"
+#include "storage_manager.h"
 
 #include <cstring>
 #include <new>
@@ -23,7 +23,7 @@ static const char *TAG = "uart_filebridge";
  * Module-private state
  * -------------------------------------------------------------------------- */
 static FileProtocol     *s_protocol   = nullptr;
-static FilesystemManager *s_fs_manager = nullptr;
+static StorageManager *s_storage_manager = nullptr;
 static TaskHandle_t       s_rx_task   = nullptr;
 static uart_port_t        s_uart_num  = UART_NUM_1;
 static bool               s_running   = false;
@@ -44,37 +44,37 @@ static esp_err_t ensure_runtime_ready(void) {
         return ESP_OK;
     }
 
-    /* Lazy-init FilesystemManager + SD mount on first data arrival.
+    /* Lazy-init StorageManager + SD mount on first data arrival.
      * This runs on the RX task stack (16 KB), NOT the main task stack (12 KB).
      * esp_vfs_fat_sdmmc_mount is very stack-heavy and would overflow main. */
-    if (!s_fs_manager) {
-        s_fs_manager = new (std::nothrow) FilesystemManager();
-        if (!s_fs_manager) {
-            ESP_LOGE(TAG, "FilesystemManager allocation failed");
+    if (!s_storage_manager) {
+        s_storage_manager = new (std::nothrow) StorageManager();
+        if (!s_storage_manager) {
+            ESP_LOGE(TAG, "StorageManager allocation failed");
             return ESP_ERR_NO_MEM;
         }
 
-        esp_err_t fs_ret = s_fs_manager->init(s_cfg.sd_mount_point, s_cfg.mount_sd_own);
+        esp_err_t fs_ret = s_storage_manager->init(s_cfg.sd_mount_point, s_cfg.mount_sd_own);
         if (fs_ret != ESP_OK) {
-            ESP_LOGW(TAG, "Filesystem init returned: %s", esp_err_to_name(fs_ret));
+            ESP_LOGW(TAG, "Storage init returned: %s", esp_err_to_name(fs_ret));
         }
     }
 
     s_protocol = new (std::nothrow) FileProtocol();
     if (!s_protocol) {
         ESP_LOGE(TAG, "FileProtocol allocation failed");
-        delete s_fs_manager;
-        s_fs_manager = nullptr;
+        delete s_storage_manager;
+        s_storage_manager = nullptr;
         return ESP_ERR_NO_MEM;
     }
 
-    esp_err_t ret = s_protocol->init(s_fs_manager);
+    esp_err_t ret = s_protocol->init(s_storage_manager);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "FileProtocol::init failed: %s", esp_err_to_name(ret));
         delete s_protocol;
         s_protocol = nullptr;
-        delete s_fs_manager;
-        s_fs_manager = nullptr;
+        delete s_storage_manager;
+        s_storage_manager = nullptr;
         return ret;
     }
 
@@ -219,9 +219,9 @@ esp_err_t esp_idf_uart_filebridge_deinit(void) {
         s_protocol = nullptr;
     }
 
-    if (s_fs_manager) {
-        delete s_fs_manager;
-        s_fs_manager = nullptr;
+    if (s_storage_manager) {
+        delete s_storage_manager;
+        s_storage_manager = nullptr;
     }
 
     s_runtime_ready = false;
