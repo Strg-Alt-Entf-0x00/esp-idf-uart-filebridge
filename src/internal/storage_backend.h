@@ -70,6 +70,7 @@ enum class StorageType : uint8_t {
  * Sent to host via CMD_STORAGE_INFO to describe backend characteristics.
  * All fields must be populated by backend implementation.
  */
+#pragma pack(push, 1)
 struct StorageBackendInfo {
     char mount_point[64];       /**< VFS mount point (e.g., "/sd", "/flash") - MUST be 64 bytes for protocol compatibility */
     uint8_t type;               /**< Backend type identifier (1 byte) */
@@ -78,10 +79,10 @@ struct StorageBackendInfo {
     uint8_t mounted;            /**< Current mount state (1 byte, 0=false, 1=true) */
     uint64_t total_bytes;       /**< Total storage capacity (0 if unavailable) */
     uint64_t free_bytes;        /**< Available storage (0 if unavailable) */
-    // NOTE: This struct layout matches Python protocol expectation.
-    // Total size with padding may vary, but protocol sends exactly 118 bytes.
-    // Implementation must use static_cast<uint8_t> for enum types.
 };
+#pragma pack(pop)
+
+static_assert(sizeof(StorageBackendInfo) == 118, "StorageBackendInfo must be exactly 118 bytes");
 
 /**
  * Abstract storage backend interface.

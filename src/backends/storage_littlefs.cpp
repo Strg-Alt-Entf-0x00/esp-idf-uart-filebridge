@@ -346,9 +346,11 @@ esp_err_t StorageLittleFS::delete_file(const char* path) {
     ESP_LOGD(TAG, "Deleting file: %s", full_path);
     
     if (unlink(full_path) != 0) {
-        ESP_LOGE(TAG, "Failed to delete %s: %s", full_path, strerror(errno));
-        xSemaphoreGive(m_mutex);
-        return ESP_FAIL;
+        if (rmdir(full_path) != 0) {
+            ESP_LOGE(TAG, "Failed to delete %s: %s", full_path, strerror(errno));
+            xSemaphoreGive(m_mutex);
+            return ESP_FAIL;
+        }
     }
     
     ESP_LOGD(TAG, "File deleted: %s", full_path);
@@ -685,10 +687,10 @@ esp_err_t StorageLittleFS::get_backend_info(StorageBackendInfo* info) {
     
     memset(info, 0, sizeof(StorageBackendInfo));
     
-    // Basic info
-    strncpy(info->mount_point, m_mount_point, sizeof(info->mount_point) - 1);
+    // Basic info (use snprintf to avoid truncation warning)
+    snprintf(info->mount_point, sizeof(info->mount_point), "%s", m_mount_point);
     info->type = static_cast<uint8_t>(get_type());
-    strncpy(info->type_name, get_type_name(), sizeof(info->type_name) - 1);
+    snprintf(info->type_name, sizeof(info->type_name), "%s", get_type_name());
     info->capabilities = get_capabilities();
     info->mounted = m_mounted;
     

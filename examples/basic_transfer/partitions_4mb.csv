@@ -1,0 +1,19 @@
+# Partition Table for 4MB Flash (ESP32, S2, C3, C6, H2)
+# Total Flash: 4MB (4,194,304 bytes / 0x400000)
+#
+# Layout:
+#   nvs:       16 KB (0x9000 - 0xD000)
+#   phy_init:   4 KB (0xD000 - 0xE000)
+#   factory: 1.5 MB  (0x10000 - 0x190000) - Application firmware
+#   flash:   768 KB  (0x190000 - 0x250000) - Flash FAT partition with wear leveling
+#   littlefs:768 KB  (0x250000 - 0x310000) - LittleFS partition
+#   spiffs:  768 KB  (0x310000 - 0x3D0000) - SPIFFS partition
+#   Reserved:192 KB  (0x3D0000 - 0x400000) - End of flash margin
+#
+# Name,       Type, SubType,  Offset,   Size,  Flags
+nvs,          data, nvs,      0x9000,   16K,
+phy_init,     data, phy,      0xD000,    4K,
+factory,      app,  factory,  0x10000,  1536K,
+flash,        data, fat,      0x190000,  768K,
+littlefs,     data, spiffs,   0x250000,  768K,
+spiffs,       data, spiffs,   0x310000,  768K,

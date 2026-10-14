@@ -116,8 +116,6 @@ public:
     esp_err_t delete_directory_recursive(const char* path) override;
     
 private:
-    
-private:
     /* ========================================================================
      * Private Members
      * ====================================================================== */

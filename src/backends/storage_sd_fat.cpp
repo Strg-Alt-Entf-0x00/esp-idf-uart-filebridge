@@ -7,7 +7,10 @@
 #include "storage_sd_fat.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
+#include "soc/soc_caps.h"
+#if SOC_SDMMC_HOST_SUPPORTED
 #include "driver/sdmmc_host.h"
+#endif
 #include <sys/stat.h>
 #include <sys/unistd.h>
 #include <cstring>
@@ -21,7 +24,10 @@
 #define FILEBRIDGE_P4_LDO 0
 #endif
 
-static const char* TAG = "storage_sd_fat";
+#ifndef CONFIG_UART_FILEBRIDGE_SD_MAX_FILES
+#define CONFIG_UART_FILEBRIDGE_SD_MAX_FILES 5
+#endif
+
 
 /* ============================================================================
  * Constructor / Destructor
@@ -97,13 +103,16 @@ esp_err_t StorageSDFAT::mount() {
         .use_one_fat            = false,      // Use both FAT copies for reliability
     };
     
+#if SOC_SDMMC_HOST_SUPPORTED
     // Configure SDMMC host
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
     host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;  // 40 MHz
     
+    esp_err_t ret = ESP_OK;
+
 #if FILEBRIDGE_P4_LDO
     // ESP32-P4: Initialize on-chip LDO for SD power
-    esp_err_t ret = init_p4_ldo_power();
+    ret = init_p4_ldo_power();
     if (ret != ESP_OK) {
         xSemaphoreGive(m_mutex);
         return ret;
@@ -142,6 +151,11 @@ esp_err_t StorageSDFAT::mount() {
         xSemaphoreGive(m_mutex);
         return ret;
     }
+#else
+    ESP_LOGW(TAG, "Hardware SDMMC is not supported on this chip (%s). SD backend unmounted.", CONFIG_IDF_TARGET);
+    xSemaphoreGive(m_mutex);
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
     
     // Log card info
     if (m_sd_card) {
@@ -233,14 +247,14 @@ esp_err_t StorageSDFAT::get_backend_info(StorageBackendInfo* info) {
     
     memset(info, 0, sizeof(StorageBackendInfo));
     
-    // Copy mount point
-    strncpy(info->mount_point, m_mount_point, sizeof(info->mount_point) - 1);
+    // Copy mount point (use snprintf to avoid truncation warning)
+    snprintf(info->mount_point, sizeof(info->mount_point), "%s", m_mount_point);
     
     // Set type and capabilities
     info->type = static_cast<uint8_t>(get_type());
     info->capabilities = get_capabilities();
     info->mounted = m_mounted;
-    strncpy(info->type_name, get_type_name(), sizeof(info->type_name) - 1);
+    snprintf(info->type_name, sizeof(info->type_name), "%s", get_type_name());
     
     // Query space info if mounted
     if (m_mounted) {
@@ -837,7 +851,6 @@ esp_err_t StorageSDFAT::cleanup_partial_uploads_in_dir(const char* dir_path) {
         return ESP_FAIL;
     }
     
-    constexpr const char* suffix = ".esp-idf-uart-filebridge.part";
     esp_err_t result = ESP_OK;
     struct dirent* entry;
     
@@ -878,9 +891,16 @@ esp_err_t StorageSDFAT::cleanup_partial_uploads_in_dir(const char* dir_path) {
             continue;
         }
         
-        // Delete partial upload files
-        if (name_len >= strlen(suffix) &&
-            strcmp(entry->d_name + name_len - strlen(suffix), suffix) == 0) {
+        // Delete partial upload files (.upload or legacy .esp-idf-uart-filebridge.part)
+        constexpr const char* suffix1 = ".upload";
+        constexpr const char* suffix2 = ".esp-idf-uart-filebridge.part";
+        bool is_partial = false;
+        if (name_len >= strlen(suffix1) && strcmp(entry->d_name + name_len - strlen(suffix1), suffix1) == 0) {
+            is_partial = true;
+        } else if (name_len >= strlen(suffix2) && strcmp(entry->d_name + name_len - strlen(suffix2), suffix2) == 0) {
+            is_partial = true;
+        }
+        if (is_partial) {
             if (unlink(full_path) != 0) {
                 ESP_LOGW(TAG, "Failed to delete partial upload: %s", full_path);
                 result = ESP_FAIL;

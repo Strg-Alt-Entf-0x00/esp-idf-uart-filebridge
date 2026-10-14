@@ -1,4 +1,4 @@
-﻿"""Universal high-level file operations for the ESP UART file bridge."""
+"""Universal high-level file operations for the ESP UART file bridge."""
 
 import logging
 import os
@@ -49,13 +49,31 @@ class ESP32FileManager:
         return self.proto.get_device_info()
 
     def get_file_stat(self, remote_path: str):
-        return self.proto.get_stat(remote_path)
+        attempts = 3
+        for attempt in range(1, attempts + 1):
+            try:
+                return self.proto.get_stat(remote_path)
+            except Exception as e:
+                if attempt == attempts:
+                    raise
+                import time
+                time.sleep(1)
 
     def list_directory(self, path: str = "/sd", quiet: bool = False):
         if path in ("", "/"):
             raise ESP32ProtocolError("Root directory listing is not supported")
 
-        entries = self.proto.list_directory(path)
+        attempts = 3
+        for attempt in range(1, attempts + 1):
+            try:
+                entries = self.proto.list_directory(path)
+                break
+            except Exception as e:
+                if attempt == attempts:
+                    raise
+                import time
+                time.sleep(1)
+
         if not quiet:
             directories = sorted((entry for entry in entries if entry.is_directory), key=lambda e: e.name)
             files = sorted((entry for entry in entries if not entry.is_directory), key=lambda e: e.name)
@@ -134,18 +152,39 @@ class ESP32FileManager:
         local_path: str | os.PathLike[str],
         progress_callback: Optional[ProgressCallback] = None,
     ) -> None:
-        data = self.proto.read_file(remote_path)
-        destination = Path(local_path)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(data)
-        if progress_callback:
-            progress_callback(len(data), len(data))
+        attempts = 3
+        for attempt in range(1, attempts + 1):
+            try:
+                data = self.proto.read_file(remote_path)
+                destination = Path(local_path)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(data)
+                if progress_callback:
+                    progress_callback(len(data), len(data))
+                return
+            except Exception as e:
+                if attempt == attempts:
+                    raise
+                import logging
+                logging.getLogger(__name__).warning(f"Download failed (attempt {attempt}/{attempts}): {e}. Retrying in 1s...")
+                import time
+                time.sleep(1)
 
     def download_file_to_bytes(self, remote_path: str, quiet: bool = False) -> bytes:
-        data = self.proto.read_file(remote_path)
-        if not quiet:
-            logger.info("Downloaded %d bytes from %s", len(data), remote_path)
-        return data
+        attempts = 3
+        for attempt in range(1, attempts + 1):
+            try:
+                data = self.proto.read_file(remote_path)
+                if not quiet:
+                    logger.info("Downloaded %d bytes from %s", len(data), remote_path)
+                return data
+            except Exception as e:
+                if attempt == attempts:
+                    raise
+                import logging
+                logging.getLogger(__name__).warning(f"Download failed (attempt {attempt}/{attempts}): {e}. Retrying in 1s...")
+                import time
+                time.sleep(1)
 
     def upload_file_from_bytes(self, data: bytes, remote_path: str, quiet: bool = False) -> None:
         try:
@@ -158,13 +197,18 @@ class ESP32FileManager:
             raise
 
     def delete_file(self, remote_path: str) -> bool:
-        try:
-            self.proto.delete_file(remote_path)
-            return True
-        except ESP32ProtocolError as error:
-            if error.error_code == ERR_FILE_NOT_FOUND:
+        attempts = 3
+        for attempt in range(1, attempts + 1):
+            try:
+                self.proto.delete_file(remote_path)
                 return True
-            raise
+            except ESP32ProtocolError as error:
+                if error.error_code == ERR_FILE_NOT_FOUND:
+                    return True
+                if attempt == attempts:
+                    raise
+                import time
+                time.sleep(1)
 
     def create_directory(self, remote_path: str, quiet: bool = False) -> bool:
         try:
@@ -176,7 +220,15 @@ class ESP32FileManager:
             raise
 
     def get_file_hash(self, remote_path: str) -> int:
-        return self.proto.get_file_hash(remote_path)
+        attempts = 3
+        for attempt in range(1, attempts + 1):
+            try:
+                return self.proto.get_file_hash(remote_path)
+            except Exception as e:
+                if attempt == attempts:
+                    raise
+                import time
+                time.sleep(1)
 
     def rename_file(self, old_path: str, new_path: str) -> None:
         self.proto.rename(old_path, new_path)

@@ -1,6 +1,5 @@
 /*
- * ESP32-P4 USB Bridge File Manager - File Protocol Implementation
- * Part 1: Core infrastructure and basic commands
+ * ESP-IDF UART FileBridge - File Protocol Implementation
  */
 
 #include "file_protocol.h"
@@ -9,6 +8,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_chip_info.h"
+#include "esp_flash.h"
 #include "esp_psram.h"
 #include <cstring>
 #include <cstdio>
@@ -17,7 +17,7 @@
 #include <sys/stat.h>
 
 static const char* TAG = "file_protocol";
-static constexpr char UPLOAD_TEMP_SUFFIX[] = ".esp-idf-uart-filebridge.part";
+static constexpr char UPLOAD_TEMP_SUFFIX[] = ".upload";
 
 // Tags to suppress during file transfers for optimal performance
 // IMPORTANT: DO NOT suppress file_protocol itself - only I/O subsystems
@@ -465,13 +465,18 @@ void FileProtocol::handle_device_info() {
     }
     info.device_name[sizeof(info.device_name) - 1] = '\0';  // Ensure null-termination
     
-    info.fw_version_major = 1;
+    info.fw_version_major = 2;
     info.fw_version_minor = 0;
     info.fw_version_patch = 0;
-    info.hw_revision = 13;  // Rev 1.3
+    info.hw_revision = 1;
     
-    // Flash info
-    info.flash_size = 32 * 1024 * 1024;  // 32MB
+    // Flash info - dynamically query actual chip flash size
+    uint32_t flash_size = 0;
+    if (esp_flash_get_size(NULL, &flash_size) == ESP_OK) {
+        info.flash_size = flash_size;
+    } else {
+        info.flash_size = 0;
+    }
     
     uint64_t flash_free = 0;
     info.flash_free = flash_free;
@@ -651,6 +656,14 @@ void FileProtocol::handle_get_file_begin(const uint8_t* payload, uint16_t length
         return;
     }
     
+    // Check if backend exists and is mounted
+    StorageBackend* backend = m_storage_manager->get_backend_for_path(path);
+    if (!backend || !backend->is_mounted()) {
+        ESP_LOGE(TAG, "Filesystem not mounted for path: %s", path);
+        send_error_ex(ERR_FS_NOT_MOUNTED, "Filesystem not mounted", 0);
+        return;
+    }
+    
     // Open file for reading
     FILE* f = fopen(path, "rb");
     if (!f) {
@@ -703,12 +716,10 @@ void FileProtocol::handle_get_file_begin(const uint8_t* payload, uint16_t length
     // Send end marker
     send_frame(CMD_GET_FILE_END, nullptr, 0);
     
-    // [FIX] CRITICAL FIX: Clear transfer state after download completes!
+    // Clear transfer state after download completes
     m_transfer_active = false;
     m_transfer_total = 0;
     m_transfer_bytes = 0;
-    m_transfer_bytes = 0;
-    m_transfer_total = 0;
     
     // NOTE: Log suppression was disabled, no need to restore
     // restore_logs_if_needed();
@@ -772,37 +783,34 @@ void FileProtocol::handle_put_file_begin(const uint8_t* payload, uint16_t length
         return;
     }
     
-    // Check if enough space is available
-    // Extract mount point from path ("/sd/..." or "/flash/...")
-    const char* mount_point = nullptr;
-    if (strncmp(path, "/sd/", 4) == 0 || strcmp(path, "/sd") == 0) {
-        mount_point = "/sd";
-    } else if (strncmp(path, "/spiffs/", 8) == 0 || strcmp(path, "/spiffs") == 0) {
-        mount_point = "/spiffs";
+    // Ensure target backend exists and is mounted
+    StorageBackend* backend = m_storage_manager->get_backend_for_path(m_transfer_path);
+    if (!backend || !backend->is_mounted()) {
+        ESP_LOGE(TAG, "Filesystem not mounted for path: %s", m_transfer_path);
+        send_error_ex(ERR_FS_NOT_MOUNTED, "Filesystem not mounted", 0);
+        return;
     }
     
-    if (mount_point) {
-        uint64_t total_bytes = 0;
-        uint64_t free_bytes = 0;
-        esp_err_t ret = m_storage_manager->get_space_info(mount_point, &total_bytes, &free_bytes);
+    // Check if enough space is available on the target backend
+    uint64_t total_bytes = 0;
+    uint64_t free_bytes = 0;
+    esp_err_t ret = m_storage_manager->get_space_info(m_transfer_path, &total_bytes, &free_bytes);
+    if (ret == ESP_OK) {
+        // Add 10% safety margin for filesystem overhead
+        uint64_t required_bytes = m_transfer_total + (m_transfer_total / 10);
         
-        if (ret == ESP_OK) {
-            // Add 10% safety margin for filesystem overhead
-            uint64_t required_bytes = m_transfer_total + (m_transfer_total / 10);
-            
-            if (free_bytes < required_bytes) {
-                char msg[128];
-                snprintf(msg, sizeof(msg), "SD card full: need %llu MB, have %llu MB free", 
-                         required_bytes / (1024*1024), free_bytes / (1024*1024));
-                ESP_LOGE(TAG, "%s", msg);
-                send_error_ex(ERR_DISK_FULL, msg, free_bytes);
-                return;
-            }
-            
-            ESP_LOGI(TAG, "Space check OK: %llu bytes free (need %llu)", free_bytes, required_bytes);
-        } else {
-            ESP_LOGW(TAG, "Could not check space: %s", esp_err_to_name(ret));
+        if (free_bytes < required_bytes) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "Storage full: need %llu MB, have %llu MB free", 
+                     required_bytes / (1024*1024), free_bytes / (1024*1024));
+            ESP_LOGE(TAG, "%s", msg);
+            send_error_ex(ERR_DISK_FULL, msg, free_bytes);
+            return;
         }
+        
+        ESP_LOGI(TAG, "Space check OK: %llu bytes free (need %llu)", free_bytes, required_bytes);
+    } else {
+        ESP_LOGD(TAG, "Space check skipped or not supported: %s", esp_err_to_name(ret));
     }
     
     // Open file for writing
@@ -990,7 +998,21 @@ void FileProtocol::handle_delete(const uint8_t* payload, uint16_t length) {
     const char* path = reinterpret_cast<const char*>(payload);
     ESP_LOGI(TAG, "DELETE: %s", path);
     
-    esp_err_t ret = m_storage_manager->delete_file(path);
+    // Check if target is a directory
+    uint64_t size = 0;
+    uint32_t timestamp = 0;
+    bool is_dir = false;
+    esp_err_t stat_ret = m_storage_manager->stat_file(path, &size, &timestamp, &is_dir);
+    
+    esp_err_t ret;
+    if (stat_ret == ESP_OK && is_dir) {
+        ret = m_storage_manager->delete_directory_recursive(path);
+    } else {
+        ret = m_storage_manager->delete_file(path);
+        if (ret == ESP_ERR_INVALID_STATE) {
+            ret = m_storage_manager->delete_directory_recursive(path);
+        }
+    }
     
     if (ret == ESP_OK) {
         send_ack();

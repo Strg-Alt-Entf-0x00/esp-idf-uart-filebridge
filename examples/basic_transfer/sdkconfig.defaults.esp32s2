@@ -1,0 +1,42 @@
+# ============================================================================
+# ESP32-S2 Hardware Target Configuration
+# ============================================================================
+# Flash: 4MB typical
+# UART: UART0 (console), UART1 available (no UART2)
+# RAM: 320 KB SRAM
+# Notes: Single core, Xtensa LX7, WiFi only (no Bluetooth)
+
+# ============================================================================
+# Flash Configuration (4 MB)
+# ============================================================================
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# ============================================================================
+# Partition Table
+# ============================================================================
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_4mb.csv"
+
+# ============================================================================
+# UART File Bridge Component Configuration
+# ============================================================================
+CONFIG_UART_FILEBRIDGE_NUM=1
+CONFIG_UART_FILEBRIDGE_TX_PIN=17
+CONFIG_UART_FILEBRIDGE_RX_PIN=18
+CONFIG_UART_FILEBRIDGE_RTS_PIN=19
+CONFIG_UART_FILEBRIDGE_CTS_PIN=20
+CONFIG_UART_FILEBRIDGE_BAUD=3000000
+
+# ============================================================================
+# SD Card Configuration
+# ============================================================================
+CONFIG_UART_FILEBRIDGE_SD_MOUNT_POINT="/sd"
+CONFIG_UART_FILEBRIDGE_SD_MOUNT_OWN=y
+CONFIG_UART_FILEBRIDGE_SD_MAX_FILES=5
+
+# ============================================================================
+# Performance (Single core, limited RAM)
+# ============================================================================
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_FREERTOS_UNICORE=y

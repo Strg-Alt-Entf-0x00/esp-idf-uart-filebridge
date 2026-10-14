@@ -15,6 +15,9 @@ def format_size(bytes_val):
         bytes_val /= 1024.0
     return f"{bytes_val:.2f} TB"
 
+import pytest
+
+@pytest.mark.skip(reason="Hardware integration test requiring connected ESP32")
 def test_multi_backend():
     """Test multi-backend discovery and info retrieval."""
     
@@ -22,11 +25,17 @@ def test_multi_backend():
     print("ESP-IDF UART Filebridge v2.0 - Multi-Backend Test")
     print("=" * 70)
     
+    import argparse
+    parser = argparse.ArgumentParser(description="Multi-Backend Test")
+    parser.add_argument("--port", "-p", default="COM6", help="Serial port (default: COM6)")
+    parser.add_argument("--baud", "-b", type=int, default=3000000, help="Baud rate (default: 3000000)")
+    args, _ = parser.parse_known_args()
+
     # Connect
     protocol = ESP32Protocol()
-    print("\nConnecting to COM13...")
+    print(f"\nConnecting to {args.port} @ {args.baud} baud...")
     
-    if not protocol.connect("COM13", 3000000):
+    if not protocol.connect(args.port, args.baud):
         print("❌ Failed to connect!")
         return 1
     
@@ -135,11 +144,11 @@ def test_multi_backend():
     print("\n🎉 ALL TESTS PASSED! Multi-backend system is working!")
     
     protocol.disconnect()
-    return 0
+    return None
 
 if __name__ == "__main__":
     try:
-        sys.exit(test_multi_backend())
+        sys.exit(test_multi_backend() or 0)
     except KeyboardInterrupt:
         print("\n⚠️  Interrupted by user")
         sys.exit(1)

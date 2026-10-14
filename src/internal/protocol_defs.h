@@ -1,8 +1,8 @@
 /*
- * ESP32-P4 USB Bridge File Manager - Protocol Definitions
+ * ESP-IDF UART FileBridge - Protocol Definitions
  * 
- * Binary protocol for reliable file transfer over USB CDC
- * Version: 1.0.0
+ * Binary protocol for reliable file transfer over UART
+ * Protocol Wire Version: 1.0 (Component Version 2.0.0)
  */
 
 #pragma once
@@ -21,7 +21,11 @@
 #define PROTO_MAGIC_0          0xF1
 #define PROTO_MAGIC_1          0x1E
 
+#ifdef CONFIG_UART_FILEBRIDGE_MAX_PAYLOAD
+#define PROTO_MAX_PAYLOAD      CONFIG_UART_FILEBRIDGE_MAX_PAYLOAD
+#else
 #define PROTO_MAX_PAYLOAD      32768  // Industrial-grade maximum payload for fast transfers
+#endif
 #define PROTO_FILE_CHUNK_SIZE  8192  // Optimized chunk size (8KB) for maximum throughput
 #define PROTO_HEADER_SIZE      9  // FIX: 2+1+1+1+2+2=9 bytes (was incorrectly 8)
 #define PROTO_CRC_SIZE         4

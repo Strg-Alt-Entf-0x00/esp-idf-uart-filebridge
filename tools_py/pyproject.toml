@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "esp-idf-uart-filebridge"
-version = "1.0.0"
+version = "2.0.0"
 description = "Host-side Python tools for esp-idf-uart-filebridge IDF component"
 requires-python = ">=3.10"
 license = {text = "The Unlicense"}

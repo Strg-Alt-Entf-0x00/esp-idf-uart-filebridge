@@ -1,8 +1,8 @@
 /*
  * esp-idf-uart-filebridge - Top-Level Init/Deinit Implementation
  *
- * Wires together: UART driver, FilesystemManager, FileProtocol, RX task.
- * Written as C to be usable from both C and C++ application code.
+ * Wires together: UART driver, StorageManager, FileProtocol, RX task.
+ * Usable from both C and C++ application code.
  */
 
 #include "esp_idf_uart_filebridge.h"
@@ -16,6 +16,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/uart.h"
+#include "soc/soc_caps.h"
+
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+#include "driver/usb_serial_jtag.h"
+#endif
 
 static const char *TAG = "uart_filebridge";
 
@@ -25,12 +30,27 @@ static const char *TAG = "uart_filebridge";
 static FileProtocol     *s_protocol   = nullptr;
 static StorageManager *s_storage_manager = nullptr;
 static TaskHandle_t       s_rx_task   = nullptr;
+static uart_filebridge_transport_t s_transport = UART_FILEBRIDGE_TRANSPORT_UART;
 static uart_port_t        s_uart_num  = UART_NUM_1;
 static bool               s_running   = false;
 static bool               s_runtime_ready = false;
 static esp_idf_uart_filebridge_config_t s_cfg = {};
 
-static esp_err_t uart_tx_cb(const uint8_t *data, size_t len) {
+static esp_err_t bridge_tx_cb(const uint8_t *data, size_t len) {
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    if (s_transport == UART_FILEBRIDGE_TRANSPORT_USB_SERIAL_JTAG) {
+        size_t total_written = 0;
+        while (total_written < len) {
+            int written = usb_serial_jtag_write_bytes(data + total_written, len - total_written, pdMS_TO_TICKS(1000));
+            if (written < 0) {
+                ESP_LOGE(TAG, "USB_SERIAL_JTAG write error");
+                return ESP_FAIL;
+            }
+            total_written += (size_t)written;
+        }
+        return ESP_OK;
+    }
+#endif
     int written = uart_write_bytes(s_uart_num, data, len);
     if (written < 0 || (size_t)written != len) {
         ESP_LOGE(TAG, "UART write error: expected %d wrote %d", (int)len, written);
@@ -78,17 +98,17 @@ static esp_err_t ensure_runtime_ready(void) {
         return ret;
     }
 
-    s_protocol->set_tx_callback(uart_tx_cb);
+    s_protocol->set_tx_callback(bridge_tx_cb);
     s_runtime_ready = true;
     ESP_LOGI(TAG, "Runtime activated lazily (SD at %s)", s_cfg.sd_mount_point);
     return ESP_OK;
 }
 
 /* --------------------------------------------------------------------------
- * UART RX Task
+ * Transport RX Task
  * -------------------------------------------------------------------------- */
 static void uart_rx_task(void *arg) {
-    const int buf_size = CONFIG_UART_FILEBRIDGE_RX_BUF_SIZE;
+    const int buf_size = s_cfg.rx_buf_size ? s_cfg.rx_buf_size : CONFIG_UART_FILEBRIDGE_RX_BUF_SIZE;
     uint8_t  *rx_buf   = (uint8_t *)malloc(buf_size);
 
     if (!rx_buf) {
@@ -97,10 +117,26 @@ static void uart_rx_task(void *arg) {
         return;
     }
 
-    ESP_LOGI(TAG, "RX task started on UART%d", (int)s_uart_num);
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    if (s_transport == UART_FILEBRIDGE_TRANSPORT_USB_SERIAL_JTAG) {
+        ESP_LOGI(TAG, "RX task started on Native USB-Serial/JTAG");
+    } else
+#endif
+    {
+        ESP_LOGI(TAG, "RX task started on UART%d", (int)s_uart_num);
+    }
 
     while (1) {
-        int len = uart_read_bytes(s_uart_num, rx_buf, buf_size, pdMS_TO_TICKS(100));
+        int len = 0;
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+        if (s_transport == UART_FILEBRIDGE_TRANSPORT_USB_SERIAL_JTAG) {
+            len = usb_serial_jtag_read_bytes(rx_buf, buf_size, pdMS_TO_TICKS(100));
+        } else
+#endif
+        {
+            len = uart_read_bytes(s_uart_num, rx_buf, buf_size, pdMS_TO_TICKS(100));
+        }
+
         if (len > 0) {
             if (!s_runtime_ready) {
                 size_t free_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
@@ -141,52 +177,70 @@ esp_err_t esp_idf_uart_filebridge_init(const esp_idf_uart_filebridge_config_t *c
         return ESP_ERR_INVALID_ARG;
     }
 
+    s_transport = cfg->transport;
     s_uart_num = cfg->uart_num;
     s_cfg = *cfg;
     s_runtime_ready = false;
 
     /* ------------------------------------------------------------------ */
-    /* 1. Install UART driver                                              */
+    /* 1. Install Transport driver (Native USB-Serial/JTAG or UART)       */
     /* ------------------------------------------------------------------ */
-    uart_config_t uart_cfg = {
-        .baud_rate           = cfg->baud_rate,
-        .data_bits           = UART_DATA_8_BITS,
-        .parity              = UART_PARITY_DISABLE,
-        .stop_bits           = UART_STOP_BITS_1,
-        .flow_ctrl           = (cfg->rts_pin >= 0 && cfg->cts_pin >= 0)
-                                ? UART_HW_FLOWCTRL_CTS_RTS
-                                : UART_HW_FLOWCTRL_DISABLE,
-        .rx_flow_ctrl_thresh = 96,
-        .source_clk          = UART_SCLK_DEFAULT,
-        .flags               = {},
-    };
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    if (s_transport == UART_FILEBRIDGE_TRANSPORT_USB_SERIAL_JTAG) {
+        usb_serial_jtag_driver_config_t jtag_cfg = {
+            .tx_buffer_size = (uint32_t)(cfg->tx_buf_size ? cfg->tx_buf_size : CONFIG_UART_FILEBRIDGE_TX_BUF_SIZE),
+            .rx_buffer_size = (uint32_t)(cfg->rx_buf_size ? cfg->rx_buf_size : CONFIG_UART_FILEBRIDGE_RX_BUF_SIZE),
+        };
+        esp_err_t ret = usb_serial_jtag_driver_install(&jtag_cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "usb_serial_jtag_driver_install failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+        ESP_LOGI(TAG, "Native USB-Serial/JTAG configured: TX_BUF=%u RX_BUF=%u",
+                 (unsigned)jtag_cfg.tx_buffer_size, (unsigned)jtag_cfg.rx_buffer_size);
+    } else
+#endif
+    {
+        uart_config_t uart_cfg = {
+            .baud_rate           = cfg->baud_rate,
+            .data_bits           = UART_DATA_8_BITS,
+            .parity              = UART_PARITY_DISABLE,
+            .stop_bits           = UART_STOP_BITS_1,
+            .flow_ctrl           = (cfg->rts_pin >= 0 && cfg->cts_pin >= 0)
+                                    ? UART_HW_FLOWCTRL_CTS_RTS
+                                    : UART_HW_FLOWCTRL_DISABLE,
+            .rx_flow_ctrl_thresh = 96,
+            .source_clk          = UART_SCLK_DEFAULT,
+            .flags               = {},
+        };
 
-    esp_err_t ret = uart_param_config(cfg->uart_num, &uart_cfg);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "uart_param_config failed: %s", esp_err_to_name(ret));
-        return ret;
+        esp_err_t ret = uart_param_config(cfg->uart_num, &uart_cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "uart_param_config failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+
+        ret = uart_set_pin(cfg->uart_num,
+                           cfg->tx_pin, cfg->rx_pin,
+                           (cfg->rts_pin >= 0) ? cfg->rts_pin : UART_PIN_NO_CHANGE,
+                           (cfg->cts_pin >= 0) ? cfg->cts_pin : UART_PIN_NO_CHANGE);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "uart_set_pin failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+
+        ret = uart_driver_install(cfg->uart_num,
+                                  cfg->rx_buf_size, cfg->tx_buf_size,
+                                  0, NULL, 0);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "uart_driver_install failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+
+        ESP_LOGI(TAG, "UART%d configured: %d baud, TX=%d RX=%d RTS=%d CTS=%d",
+                 (int)cfg->uart_num, cfg->baud_rate,
+                 cfg->tx_pin, cfg->rx_pin, cfg->rts_pin, cfg->cts_pin);
     }
-
-    ret = uart_set_pin(cfg->uart_num,
-                       cfg->tx_pin, cfg->rx_pin,
-                       (cfg->rts_pin >= 0) ? cfg->rts_pin : UART_PIN_NO_CHANGE,
-                       (cfg->cts_pin >= 0) ? cfg->cts_pin : UART_PIN_NO_CHANGE);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "uart_set_pin failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    ret = uart_driver_install(cfg->uart_num,
-                              cfg->rx_buf_size, cfg->tx_buf_size,
-                              0, NULL, 0);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "uart_driver_install failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    ESP_LOGI(TAG, "UART%d configured: %d baud, TX=%d RX=%d RTS=%d CTS=%d",
-             (int)cfg->uart_num, cfg->baud_rate,
-             cfg->tx_pin, cfg->rx_pin, cfg->rts_pin, cfg->cts_pin);
 
     /* ------------------------------------------------------------------ */
     /* 2. Start RX Task (SD + Protocol init deferred to first RX data)     */
@@ -196,7 +250,14 @@ esp_err_t esp_idf_uart_filebridge_init(const esp_idf_uart_filebridge_config_t *c
                                 cfg->task_priority, &s_rx_task);
     if (rc != pdPASS) {
         ESP_LOGE(TAG, "RX task creation failed");
-        uart_driver_delete(cfg->uart_num);
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+        if (s_transport == UART_FILEBRIDGE_TRANSPORT_USB_SERIAL_JTAG) {
+            usb_serial_jtag_driver_uninstall();
+        } else
+#endif
+        {
+            uart_driver_delete(cfg->uart_num);
+        }
         return ESP_ERR_NO_MEM;
     }
 
@@ -225,7 +286,14 @@ esp_err_t esp_idf_uart_filebridge_deinit(void) {
     }
 
     s_runtime_ready = false;
-    uart_driver_delete(s_uart_num);
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    if (s_transport == UART_FILEBRIDGE_TRANSPORT_USB_SERIAL_JTAG) {
+        usb_serial_jtag_driver_uninstall();
+    } else
+#endif
+    {
+        uart_driver_delete(s_uart_num);
+    }
     s_running = false;
     ESP_LOGI(TAG, "esp-idf-uart-filebridge deinitialized");
     return ESP_OK;
@@ -255,3 +323,13 @@ extern "C" esp_err_t esp_idf_uart_filebridge_mount_sd(void) {
     }
     return ensure_runtime_ready();
 }
+
+#ifdef __cplusplus
+StorageManager* esp_idf_uart_filebridge_get_storage_manager(void) {
+    if (!s_runtime_ready) {
+        ESP_LOGW(TAG, "Storage manager not yet initialized - call esp_idf_uart_filebridge_mount_sd() first");
+        return nullptr;
+    }
+    return s_storage_manager;
+}
+#endif

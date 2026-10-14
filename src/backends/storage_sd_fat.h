@@ -161,7 +161,7 @@ private:
     /**
      * Cleanup partial upload files recursively.
      * 
-     * Removes all files ending with ".esp-idf-uart-filebridge.part" suffix.
+     * Removes all files ending with ".upload" (or legacy ".esp-idf-uart-filebridge.part") suffix.
      * Called automatically after mount to clean up interrupted uploads.
      * 
      * @param dir_path  Directory to clean (absolute VFS path)

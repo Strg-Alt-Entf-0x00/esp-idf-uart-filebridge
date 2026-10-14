@@ -1,0 +1,82 @@
+# ============================================================================
+# ESP32 (Original) Hardware Target Configuration
+# ============================================================================
+# Flash: 4MB typical
+# Single-cable operation via onboard USB-to-UART (CP2102/CH340) on UART0
+# RAM: 520 KB SRAM
+# Notes: Dual core, Xtensa LX6, WiFi + BT Classic + BLE
+
+# ============================================================================
+# Console Configuration (Disable console so UART0 is dedicated to Filebridge)
+# ============================================================================
+CONFIG_ESP_CONSOLE_NONE=y
+CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
+CONFIG_LOG_DEFAULT_LEVEL_NONE=y
+CONFIG_LOG_DEFAULT_LEVEL=0
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
+CONFIG_TASK_WDT_TIMEOUT_S=30
+
+# ============================================================================
+# Flash Configuration (4 MB)
+# ============================================================================
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# ============================================================================
+# Partition Table
+# ============================================================================
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_4mb.csv"
+
+# ============================================================================
+# UART File Bridge Component Configuration (UART0 via onboard CP2102, no extra wires)
+# ============================================================================
+CONFIG_UART_FILEBRIDGE_NUM=0
+CONFIG_UART_FILEBRIDGE_TX_PIN=1
+CONFIG_UART_FILEBRIDGE_RX_PIN=3
+CONFIG_UART_FILEBRIDGE_RTS_PIN=-1
+CONFIG_UART_FILEBRIDGE_CTS_PIN=-1
+CONFIG_UART_FILEBRIDGE_BAUD=921600
+
+# ============================================================================
+# SD Card Configuration
+# ============================================================================
+CONFIG_UART_FILEBRIDGE_SD_MOUNT_POINT="/sd"
+CONFIG_UART_FILEBRIDGE_SD_MOUNT_OWN=n
+CONFIG_UART_FILEBRIDGE_SD_MAX_FILES=5
+
+# ============================================================================
+# Task Stack Configuration
+# ============================================================================
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# ============================================================================
+# Storage Backend Configuration (v2.0 Multi-Backend Support)
+# ============================================================================
+CONFIG_UART_FILEBRIDGE_BACKEND_SPIFFS=y
+CONFIG_UART_FILEBRIDGE_SPIFFS_MOUNT_POINT="/spiffs"
+CONFIG_UART_FILEBRIDGE_SPIFFS_PARTITION="spiffs"
+CONFIG_UART_FILEBRIDGE_SPIFFS_MAX_FILES=5
+
+CONFIG_UART_FILEBRIDGE_BACKEND_FLASH_FAT=y
+CONFIG_UART_FILEBRIDGE_FLASH_FAT_MOUNT_POINT="/flash"
+CONFIG_UART_FILEBRIDGE_FLASH_FAT_PARTITION="flash"
+CONFIG_UART_FILEBRIDGE_FLASH_FAT_MAX_FILES=5
+
+CONFIG_UART_FILEBRIDGE_BACKEND_LITTLEFS=y
+CONFIG_UART_FILEBRIDGE_LITTLEFS_MOUNT_POINT="/lfs"
+CONFIG_UART_FILEBRIDGE_LITTLEFS_PARTITION="littlefs"
+CONFIG_UART_FILEBRIDGE_LITTLEFS_MAX_FILES=5
+
+# ============================================================================
+# Performance (Limited flash)
+# ============================================================================
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# ============================================================================
+# RAM Optimization (ESP32 Classic has limited SRAM)
+# The default 32 KB protocol buffers (x2 = 64 KB) are too large.
+# Reducing to 8 KB (matching chunk size) saves ~48 KB of heap RAM,
+# which is needed for Flash/FAT wear-leveling and LittleFS caches.
+# ============================================================================
+CONFIG_UART_FILEBRIDGE_MAX_PAYLOAD=8192

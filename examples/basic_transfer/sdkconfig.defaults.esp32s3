@@ -1,0 +1,51 @@
+# ============================================================================
+# ESP32-S3 Hardware Target Configuration
+# ============================================================================
+# Flash: 16MB (Detected on board)
+# USB Port: Native USB-Serial/JTAG (Console/Log on COM3)
+# COM Port: CH343 USB-UART chip on UART0 (Filebridge on COM6)
+# RAM: 512 KB SRAM + 8MB PSRAM
+
+# ============================================================================
+# Console Configuration (Route to native USB-Serial/JTAG)
+# ============================================================================
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# ============================================================================
+# Flash Configuration (16 MB)
+# ============================================================================
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# ============================================================================
+# Partition Table
+# ============================================================================
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_16mb.csv"
+
+# ============================================================================
+# UART File Bridge Component Configuration (UART0 on CH343)
+# ============================================================================
+CONFIG_UART_FILEBRIDGE_NUM=0
+CONFIG_UART_FILEBRIDGE_TX_PIN=43
+CONFIG_UART_FILEBRIDGE_RX_PIN=44
+CONFIG_UART_FILEBRIDGE_RTS_PIN=-1
+CONFIG_UART_FILEBRIDGE_CTS_PIN=-1
+CONFIG_UART_FILEBRIDGE_BAUD=3000000
+CONFIG_UART_FILEBRIDGE_RX_BUF_SIZE=16384
+CONFIG_UART_FILEBRIDGE_TX_BUF_SIZE=16384
+
+# ============================================================================
+# SD Card Configuration
+# ============================================================================
+CONFIG_UART_FILEBRIDGE_SD_MOUNT_POINT="/sd"
+CONFIG_UART_FILEBRIDGE_SD_MOUNT_OWN=y
+CONFIG_UART_FILEBRIDGE_SD_MAX_FILES=5
+
+# ============================================================================
+# Performance (Dual core, more RAM)
+# ============================================================================
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_FREERTOS_UNICORE=n
+

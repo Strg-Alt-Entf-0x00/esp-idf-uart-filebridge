@@ -80,24 +80,16 @@ esp_err_t StorageFlashFAT::mount() {
     
     ESP_LOGI(TAG, "Mounting flash partition '%s' at %s", m_partition_label, m_mount_point);
     
-    // Initialize wear leveling
-    esp_err_t ret = init_wear_leveling();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Wear leveling init failed: %s", esp_err_to_name(ret));
-        xSemaphoreGive(m_mutex);
-        return ret;
-    }
-    
-    // Mount FAT filesystem with wear leveling
+    // Mount FAT filesystem with wear leveling (handles wl_mount and auto-formatting internally)
     esp_vfs_fat_mount_config_t mount_config = {
-        .format_if_mount_failed = false,  // Don't auto-format (explicit format() call)
+        .format_if_mount_failed = true,  // PROFESSIONAL: Auto-format on first mount
         .max_files = m_max_files,
         .allocation_unit_size = CONFIG_WL_SECTOR_SIZE,
         .disk_status_check_enable = false,
         .use_one_fat = false
     };
     
-    ret = esp_vfs_fat_spiflash_mount_rw_wl(m_mount_point, m_partition_label, 
+    esp_err_t ret = esp_vfs_fat_spiflash_mount_rw_wl(m_mount_point, m_partition_label, 
                                             &mount_config, &m_wl_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to mount FAT: %s", esp_err_to_name(ret));
@@ -179,25 +171,7 @@ esp_err_t StorageFlashFAT::format() {
         m_wl_handle = WL_INVALID_HANDLE;
     }
     
-    // Initialize wear leveling if not already done
-    if (m_wl_handle == WL_INVALID_HANDLE) {
-        esp_err_t ret = init_wear_leveling();
-        if (ret != ESP_OK) {
-            xSemaphoreGive(m_mutex);
-            return ret;
-        }
-    }
-    
-    // Format with FAT
-    esp_vfs_fat_mount_config_t mount_config = {
-        .format_if_mount_failed = true,  // Force format
-        .max_files = m_max_files,
-        .allocation_unit_size = CONFIG_WL_SECTOR_SIZE,
-        .disk_status_check_enable = false,
-        .use_one_fat = false
-    };
-    
-    esp_err_t ret = esp_vfs_fat_spiflash_format_rw_wl(m_partition_label, m_mount_point);
+    esp_err_t ret = esp_vfs_fat_spiflash_format_rw_wl(m_mount_point, m_partition_label);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Format failed: %s", esp_err_to_name(ret));
         xSemaphoreGive(m_mutex);
@@ -208,6 +182,13 @@ esp_err_t StorageFlashFAT::format() {
     
     // Remount if it was mounted before
     if (was_mounted) {
+        esp_vfs_fat_mount_config_t mount_config = {
+            .format_if_mount_failed = false,
+            .max_files = m_max_files,
+            .allocation_unit_size = CONFIG_WL_SECTOR_SIZE,
+            .disk_status_check_enable = false,
+            .use_one_fat = false
+        };
         ret = esp_vfs_fat_spiflash_mount_rw_wl(m_mount_point, m_partition_label,
                                                 &mount_config, &m_wl_handle);
         if (ret == ESP_OK) {
@@ -252,15 +233,11 @@ esp_err_t StorageFlashFAT::get_space_info(uint64_t* total_bytes, uint64_t* free_
         return ESP_ERR_INVALID_ARG;
     }
     
-    // Get filesystem stats
-    struct statvfs stat;
-    if (statvfs(m_mount_point, &stat) != 0) {
-        ESP_LOGE(TAG, "statvfs failed: %s", strerror(errno));
-        return ESP_FAIL;
+    esp_err_t ret = esp_vfs_fat_info(m_mount_point, total_bytes, free_bytes);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "esp_vfs_fat_info failed for %s: %s", m_mount_point, esp_err_to_name(ret));
+        return ret;
     }
-    
-    *total_bytes = (uint64_t)stat.f_blocks * stat.f_frsize;
-    *free_bytes = (uint64_t)stat.f_bfree * stat.f_frsize;
     
     return ESP_OK;
 }
@@ -348,9 +325,11 @@ esp_err_t StorageFlashFAT::delete_file(const char* path) {
     ESP_LOGD(TAG, "Deleting file: %s", full_path);
     
     if (unlink(full_path) != 0) {
-        ESP_LOGE(TAG, "Failed to delete %s: %s", full_path, strerror(errno));
-        xSemaphoreGive(m_mutex);
-        return ESP_FAIL;
+        if (rmdir(full_path) != 0) {
+            ESP_LOGE(TAG, "Failed to delete %s: %s", full_path, strerror(errno));
+            xSemaphoreGive(m_mutex);
+            return ESP_FAIL;
+        }
     }
     
     ESP_LOGD(TAG, "File deleted: %s", full_path);
@@ -686,10 +665,10 @@ esp_err_t StorageFlashFAT::get_backend_info(StorageBackendInfo* info) {
     
     memset(info, 0, sizeof(StorageBackendInfo));
     
-    // Basic info
-    strncpy(info->mount_point, m_mount_point, sizeof(info->mount_point) - 1);
+    // Basic info (use snprintf to avoid truncation warning)
+    snprintf(info->mount_point, sizeof(info->mount_point), "%s", m_mount_point);
     info->type = static_cast<uint8_t>(get_type());
-    strncpy(info->type_name, get_type_name(), sizeof(info->type_name) - 1);
+    snprintf(info->type_name, sizeof(info->type_name), "%s", get_type_name());
     info->capabilities = get_capabilities();
     info->mounted = m_mounted;
     

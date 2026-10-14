@@ -2,7 +2,7 @@
  * esp-idf-uart-filebridge - Top-Level Public API
  *
  * Single-call initialization for UART file bridge on ESP32.
- * Manages UART driver, FilesystemManager, FileProtocol, and RX task internally.
+ * Manages UART driver, StorageManager, FileProtocol, and RX task internally.
  *
  * Supported targets: ESP32, ESP32-S3, ESP32-C6, ESP32-P4
  * Primary tested hardware: FT232R USB-UART @ 3 Mbit/s + RTS/CTS
@@ -26,24 +26,41 @@ extern "C" {
  * ========================================================================== */
 
 /**
+ * Transport interface selection.
+ */
+typedef enum {
+    UART_FILEBRIDGE_TRANSPORT_UART = 0,             /**< Hardware UART (UART0, UART1, etc.) */
+    UART_FILEBRIDGE_TRANSPORT_USB_SERIAL_JTAG = 1,  /**< Native on-chip USB-Serial/JTAG */
+} uart_filebridge_transport_t;
+
+/**
  * Configuration for esp_idf_uart_filebridge_init().
  * All fields have Kconfig-based defaults accessible via
  * ESP_IDF_UART_FILEBRIDGE_CONFIG_DEFAULT().
  */
 typedef struct {
+    uart_filebridge_transport_t transport;      /**< Transport interface (UART or USB_SERIAL_JTAG) */
     uart_port_t uart_num;       /**< UART peripheral (UART_NUM_0/1/2) */
     int         tx_pin;         /**< TX GPIO, -1 = use Kconfig default */
     int         rx_pin;         /**< RX GPIO, -1 = use Kconfig default */
     int         rts_pin;        /**< RTS GPIO for HW flow ctrl, -1 = disabled */
     int         cts_pin;        /**< CTS GPIO for HW flow ctrl, -1 = disabled */
     int         baud_rate;      /**< Baud rate. FT232R max = 3000000 */
-    int         rx_buf_size;    /**< UART HW RX ring buffer size (bytes) */
-    int         tx_buf_size;    /**< UART HW TX ring buffer size (bytes) */
+    int         rx_buf_size;    /**< UART/USB HW RX ring buffer size (bytes) */
+    int         tx_buf_size;    /**< UART/USB HW TX ring buffer size (bytes) */
     int         task_stack;     /**< RX processing task stack size (bytes) */
     int         task_priority;  /**< RX task FreeRTOS priority */
     const char* sd_mount_point; /**< VFS mount point, e.g. "/sd" */
     bool        mount_sd_own;   /**< true = component mounts SD internally */
 } esp_idf_uart_filebridge_config_t;
+
+#if defined(CONFIG_UART_FILEBRIDGE_TRANSPORT_USB_SERIAL_JTAG)
+#define UART_FILEBRIDGE_CONFIG_DEFAULT_TRANSPORT UART_FILEBRIDGE_TRANSPORT_USB_SERIAL_JTAG
+#define UART_FILEBRIDGE_CONFIG_DEFAULT_UART_NUM  ((uart_port_t)0)
+#else
+#define UART_FILEBRIDGE_CONFIG_DEFAULT_TRANSPORT UART_FILEBRIDGE_TRANSPORT_UART
+#define UART_FILEBRIDGE_CONFIG_DEFAULT_UART_NUM  ((uart_port_t)CONFIG_UART_FILEBRIDGE_NUM)
+#endif
 
 /**
  * Default configuration populated from Kconfig values.
@@ -54,8 +71,13 @@ typedef struct {
  *   cfg.tx_pin = 17;  // override TX pin for your board
  *   ESP_ERROR_CHECK(esp_idf_uart_filebridge_init(&cfg));
  */
+#ifndef CONFIG_UART_FILEBRIDGE_SD_MOUNT_OWN
+#define CONFIG_UART_FILEBRIDGE_SD_MOUNT_OWN false
+#endif
+
 #define ESP_IDF_UART_FILEBRIDGE_CONFIG_DEFAULT() {                          \
-    .uart_num      = (uart_port_t)CONFIG_UART_FILEBRIDGE_NUM,              \
+    .transport     = UART_FILEBRIDGE_CONFIG_DEFAULT_TRANSPORT,             \
+    .uart_num      = UART_FILEBRIDGE_CONFIG_DEFAULT_UART_NUM,              \
     .tx_pin        = CONFIG_UART_FILEBRIDGE_TX_PIN,                        \
     .rx_pin        = CONFIG_UART_FILEBRIDGE_RX_PIN,                        \
     .rts_pin       = CONFIG_UART_FILEBRIDGE_RTS_PIN,                       \
@@ -135,4 +157,29 @@ esp_err_t esp_idf_uart_filebridge_mount_sd(void);
 
 #ifdef __cplusplus
 }
+
+// C++ API for multi-backend support
+class StorageManager;
+
+/**
+ * @brief Get the StorageManager instance for registering additional backends.
+ * 
+ * Use this function to access the storage manager and register custom backends
+ * like SPIFFS, Flash/FAT, or LittleFS in addition to the default SD backend.
+ * 
+ * @note The storage manager is only available after runtime initialization
+ *       (triggered by first UART data or esp_idf_uart_filebridge_mount_sd()).
+ * @note Only available when compiled as C++ code.
+ * 
+ * @return Pointer to StorageManager, or NULL if not yet initialized
+ * 
+ * Example (C++ code):
+ *   StorageManager* mgr = esp_idf_uart_filebridge_get_storage_manager();
+ *   StorageSpiffs* spiffs = new StorageSpiffs("/spiffs", "storage", 5, true);
+ *   mgr->register_backend(spiffs, true);
+ *   spiffs->mount();
+ */
+StorageManager* esp_idf_uart_filebridge_get_storage_manager(void);
+
 #endif
+

@@ -90,11 +90,11 @@ class FileStat:
 class StorageBackendInfo:
     """Storage backend information (v2.0 multi-backend support)."""
     
-    # Storage types (must match C++ enum)
-    TYPE_SD_FAT = 0
-    TYPE_FLASH_FAT = 1
-    TYPE_LITTLEFS = 2
-    TYPE_SPIFFS = 3
+    # Storage types (must match C++ StorageType enum in storage_backend.h)
+    TYPE_SD_FAT = 1
+    TYPE_FLASH_FAT = 2
+    TYPE_LITTLEFS = 3
+    TYPE_SPIFFS = 4
     TYPE_CUSTOM = 255
     
     TYPE_NAMES = {
@@ -105,27 +105,35 @@ class StorageBackendInfo:
         TYPE_CUSTOM: "Custom"
     }
     
-    # Capability flags (must match C++ enum)
-    CAP_MOUNT = 0x00000001
-    CAP_UNMOUNT = 0x00000002
-    CAP_FORMAT = 0x00000004
-    CAP_FILE_READ = 0x00000010
-    CAP_FILE_WRITE = 0x00000020
-    CAP_FILE_DELETE = 0x00000040
-    CAP_FILE_RENAME = 0x00000080
-    CAP_FILE_STAT = 0x00000100
-    CAP_FILE_COPY = 0x00000200
-    CAP_DIRECTORIES = 0x00001000
-    CAP_SPACE_INFO = 0x00002000
-    CAP_LARGE_FILES = 0x00010000
-    CAP_TIMESTAMPS = 0x00020000
-    CAP_FILE_HASH = 0x00040000
-    CAP_COMPRESSION = 0x00080000
+    # Capability flags (must match C++ StorageCapability enum in storage_backend.h)
+    CAP_NONE              = 0
+    CAP_READ              = 1 << 0
+    CAP_WRITE             = 1 << 1
+    CAP_DIRECTORIES       = 1 << 2
+    CAP_RECURSIVE_DELETE  = 1 << 3
+    CAP_RENAME            = 1 << 4
+    CAP_COPY              = 1 << 5
+    CAP_HASH              = 1 << 6
+    CAP_FORMAT            = 1 << 7
+    CAP_TIMESTAMPS        = 1 << 8
+    CAP_LARGE_FILES       = 1 << 9
+    CAP_COMPRESSION       = 1 << 10
+    CAP_WEAR_LEVELING     = 1 << 11
+    CAP_ALL               = 0xFFFFFFFF
+    
+    # Backward compatibility aliases
+    CAP_FILE_READ         = CAP_READ
+    CAP_FILE_WRITE        = CAP_WRITE
+    CAP_FILE_DELETE       = CAP_RECURSIVE_DELETE
+    CAP_FILE_RENAME       = CAP_RENAME
+    CAP_FILE_COPY         = CAP_COPY
+    CAP_FILE_HASH         = CAP_HASH
     
     def __init__(self, data: bytes):
         # struct StorageBackendInfo: char mount_point[64], uint8_t type, char type_name[32],
         # uint32_t capabilities, uint8_t mounted, uint64_t total_bytes, uint64_t free_bytes
-        unpacked = struct.unpack('<64sB32sIBQQ', data[:121])
+        # Exactly 118 bytes packed (<64sB32sIBQQ)
+        unpacked = struct.unpack('<64sB32sIBQQ', data[:118])
         self.mount_point = unpacked[0].split(b'\0', 1)[0].decode('utf-8')
         self.type = unpacked[1]
         self.type_name = unpacked[2].split(b'\0', 1)[0].decode('utf-8')
@@ -190,29 +198,52 @@ class ESP32Protocol:
         self.max_payload = PROTO_MAX_PAYLOAD
 
     @with_lock
-    def connect(self, port_name: str, baud_rate: int = 3000000) -> bool:
-        try:
-            self.ser = serial.Serial(
-                port_name,
-                baud_rate,
-                timeout=0.5,
-                rtscts=True,
-                dsrdtr=False,
-                xonxoff=False,
-                write_timeout=5.0,
-            )
-            self.sequence = 0
-            self._rx_sequence = None
-            self.ser.reset_input_buffer()
-            self._drain_boot_noise()
+    def connect(self, port_name: str, baud_rate: int = 3000000, rtscts: bool = False) -> bool:
+        modes_to_try = [rtscts]
+        if rtscts:
+            modes_to_try.append(False)
 
-            return self.send_hello()
-        except Exception as e:
-            logger.error(f"Failed to connect to {port_name}: {e}")
-            if self.ser:
-                self.ser.close()
-                self.ser = None
-            return False
+        for mode in modes_to_try:
+            for attempt in range(3):
+                try:
+                    if self.ser and self.ser.is_open:
+                        self.disconnect()
+
+                    if attempt > 0:
+                        time.sleep(0.3)
+
+                    self.ser = serial.Serial(
+                        port_name,
+                        baud_rate,
+                        timeout=0.5,
+                        rtscts=mode,
+                        dsrdtr=False,
+                        xonxoff=False,
+                        write_timeout=2.0 if mode else 5.0,
+                    )
+                    try:
+                        self.ser.dtr = False
+                        self.ser.rts = False
+                    except Exception:
+                        pass
+                    self.sequence = 0
+                    self._rx_sequence = None
+                    self.ser.reset_input_buffer()
+                    self._drain_boot_noise()
+
+                    # Try sending HELLO up to 3 times to allow line to stabilize
+                    for hello_try in range(3):
+                        if self.send_hello():
+                            return True
+                        time.sleep(0.2)
+
+                    self.disconnect()
+                except Exception as e:
+                    logger.debug(f"Connect attempt {attempt+1} (rtscts={mode}) to {port_name} failed: {e}")
+                    self.disconnect()
+
+        logger.error(f"Failed to connect to {port_name} @ {baud_rate} baud")
+        return False
 
     @with_lock
     def auto_detect(self) -> bool:
@@ -357,9 +388,11 @@ class ESP32Protocol:
     def _wait_ack(self, timeout_sec=2.0) -> bool:
         deadline = self._deadline(timeout_sec)
         while time.monotonic() < deadline:
+            remaining = max(0.05, deadline - time.monotonic())
             try:
-                cmd, _ = self._receive_frame(timeout_sec=max(0.05, min(0.5, deadline - time.monotonic())))
-            except ESP32ProtocolError:
+                cmd, _ = self._receive_frame(timeout_sec=remaining)
+            except ESP32ProtocolError as e:
+                logger.debug(f"_wait_ack error: {e}")
                 return False
             if cmd == CMD_PROGRESS:
                 continue
@@ -374,10 +407,12 @@ class ESP32Protocol:
         """
         deadline = self._deadline(timeout_sec)
         while time.monotonic() < deadline:
+            remaining = max(0.05, deadline - time.monotonic())
             try:
-                cmd, payload = self._receive_frame(timeout_sec=max(0.05, min(0.5, deadline - time.monotonic())))
-            except ESP32ProtocolError:
-                return False, 0, "Timeout"
+                cmd, payload = self._receive_frame(timeout_sec=remaining)
+            except ESP32ProtocolError as e:
+                logger.debug(f"_wait_ack_with_error error: {e}")
+                return False, 0, str(e)
             if cmd == CMD_PROGRESS:
                 continue
             if cmd == CMD_NACK:
@@ -417,6 +452,10 @@ class ESP32Protocol:
 
     @with_lock
     def send_hello(self) -> bool:
+        if self.ser and self.ser.is_open:
+            self.ser.reset_input_buffer()
+        self.sequence = 0
+        self._rx_sequence = None
         self._send_frame(CMD_HELLO)
         return self._wait_ack()
 
@@ -563,7 +602,7 @@ class ESP32Protocol:
         payload = struct.pack('<Q', file_size) + path_bytes
         self._send_frame(CMD_PUT_FILE_BEGIN, payload)
         
-        success, error_code, error_msg = self._wait_ack_with_error()
+        success, error_code, error_msg = self._wait_ack_with_error(timeout_sec=10.0)
         if not success:
             raise ESP32ProtocolError(error_msg or "NACK on PUT_FILE_BEGIN", error_code)
 
@@ -571,8 +610,12 @@ class ESP32Protocol:
     def write_stream_data(self, chunk: bytes):
         """Write file data chunk in streaming mode.
         Hardware flow control will block ser.write() automatically if ESP32 buffers fill up.
+        When hardware flow control is not available (e.g. 2-wire UART0), a small pacing delay
+        prevents ring buffer overflows while the ESP32 is committing flash pages.
         """
         self._send_frame(CMD_PUT_FILE_DATA, chunk)
+        if not getattr(self.ser, 'rtscts', False):
+            time.sleep(0.015)
         
         # Check for asynchronous NACKs without blocking
         if self.ser.in_waiting > 0:
@@ -588,8 +631,9 @@ class ESP32Protocol:
     @with_lock
     def end_write_stream(self):
         self._send_frame(CMD_PUT_FILE_END)
-        if not self._wait_ack():
-            raise ESP32ProtocolError("NACK on PUT_FILE_END")
+        success, code, msg = self._wait_ack_with_error(timeout_sec=30.0)
+        if not success:
+            raise ESP32ProtocolError(f"NACK on PUT_FILE_END: {msg} (code 0x{code:02X})", code)
 
     @with_lock
     def abort_write_stream(self):

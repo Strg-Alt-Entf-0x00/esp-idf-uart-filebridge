@@ -1,5 +1,5 @@
-﻿/*
- * ESP32-P4 USB Bridge File Manager - File Protocol Handler
+/*
+ * ESP-IDF UART FileBridge - File Protocol Handler
  * 
  * Handles protocol frame parsing and command execution
  */
@@ -16,30 +16,6 @@
 
 // Forward declarations
 class StorageManager;
-
-/**
- * RAII class for temporarily suppressing logs during critical operations
- * Industrial-grade approach: logs are disabled during transfers, re-enabled after
- */
-class LogSuppressor {
-public:
-    LogSuppressor(const char* tag) : m_tag(tag) {
-        if (m_tag) {
-            m_original_level = esp_log_level_get(m_tag);
-            esp_log_level_set(m_tag, ESP_LOG_NONE);
-        }
-    }
-    
-    ~LogSuppressor() {
-        if (m_tag) {
-            esp_log_level_set(m_tag, m_original_level);
-        }
-    }
-    
-private:
-    const char* m_tag;
-    esp_log_level_t m_original_level;
-};
 
 class FileProtocol {
 public:
@@ -58,7 +34,7 @@ public:
     esp_err_t init(StorageManager* storage_manager);
 
     /**
-     * Process incoming data from USB CDC
+     * Process incoming data from UART
      * @param data Incoming byte stream
      * @param length Number of bytes
      */
@@ -100,7 +76,7 @@ public:
     esp_err_t send_progress(uint64_t bytes_transferred, uint64_t total_bytes);
 
     /**
-     * Set TX callback for sending data via USB CDC
+     * Set TX callback for sending data via UART
      */
     void set_tx_callback(esp_err_t (*callback)(const uint8_t*, size_t));
     

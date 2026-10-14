@@ -1,4 +1,4 @@
-﻿# Build directories
+# Build directories
 build/
 build-*/
 
@@ -17,6 +17,7 @@ dist/
 
 # Development documentation (keep local, except specific files)
 .docs/*
+.kiro/
 
 # IDE/Editor specific files
 .clangd

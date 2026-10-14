@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 esp-idf-uart-filebridge CLI - Command-line tool for esp-idf-uart-filebridge.
 
@@ -18,7 +18,7 @@ import os
 import argparse
 import logging
 from pathlib import Path
-from .protocol import ESP32Protocol, ESP32ProtocolError
+from .protocol import ESP32Protocol, ESP32ProtocolError, StorageBackendInfo
 from .file_manager import ESP32FileManager
 
 log = logging.getLogger("esp_file_bridge.cli")
@@ -113,6 +113,7 @@ def main():
     )
     parser.add_argument("--port", "-p", help="Serial port (e.g. COM4 or /dev/ttyUSB0)")
     parser.add_argument("--baud", "-b", type=int, default=3000000, help="Baud rate (default: 3000000)")
+    parser.add_argument("--flow-control", action="store_true", help="Enable hardware flow control (RTS/CTS)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
 
     sub = parser.add_subparsers(dest="command", required=True)
@@ -165,6 +166,9 @@ def main():
     webdav_p.add_argument("--no-mount", action="store_true", help="Disable auto-mount (Windows)")
     webdav_p.add_argument("--drive", help="Drive letter for Windows (e.g. Z:)")
 
+    storage_p = sub.add_parser("storage", aliases=["storage-list", "backends"], help="List registered storage backends (v2.0 multi-backend)")
+    storage_p.add_argument("mount", nargs="?", help="Optional mount point to query detailed info (e.g. /sd, /flash)")
+
     batch_p = sub.add_parser("batch", help="Execute batch configuration file (JSON/YAML)")
     batch_p.add_argument("config", help="Path to batch configuration file (*.json, *.yaml, *.yml)")
     batch_p.add_argument("--dry-run", action="store_true", help="Simulate execution without making changes")
@@ -172,7 +176,29 @@ def main():
     batch_p.add_argument("--clear-state", action="store_true", help="Clear previous execution state before running")
     batch_p.add_argument("--var", "-V", action="append", metavar="KEY=VALUE", help="Override config variables (e.g., -V PORT=COM13)")
 
-    args = parser.parse_args()
+    # Allow global options (--port, --baud, --verbose) to be placed anywhere on the command line
+    raw_args = sys.argv[1:]
+    flags_with_val = {'--port', '-p', '--baud', '-b'}
+    bool_flags = {'--verbose', '-v', '--flow-control'}
+    global_args = []
+    cmd_args = []
+    i = 0
+    while i < len(raw_args):
+        arg = raw_args[i]
+        if arg in flags_with_val:
+            global_args.append(arg)
+            if i + 1 < len(raw_args):
+                global_args.append(raw_args[i + 1])
+                i += 1
+        elif any(arg.startswith(f + '=') for f in flags_with_val):
+            global_args.append(arg)
+        elif arg in bool_flags:
+            global_args.append(arg)
+        else:
+            cmd_args.append(arg)
+        i += 1
+
+    args = parser.parse_args(global_args + cmd_args)
 
     # Special handling for batch command (doesn't require --port in args, reads from config)
     if args.command == "batch":
@@ -191,7 +217,7 @@ def main():
     try:
         proto = ESP32Protocol()
         manager = ESP32FileManager(proto)
-        if not proto.connect(args.port, args.baud):
+        if not proto.connect(args.port, args.baud, rtscts=args.flow_control):
             raise ESP32ProtocolError(f"Could not connect to {args.port}")
 
         if args.command == "info":
@@ -214,6 +240,34 @@ def main():
             
             # Transfer settings
             print(f"Chunk Size : {info.optimal_chunk_size // 1024} KB")
+
+        elif args.command in ("storage", "storage-list", "backends"):
+            if args.mount:
+                b = proto.get_storage_info(args.mount)
+                status = "Mounted" if b.mounted else "Unmounted"
+                print(f"Mount Point  : {b.mount_point}")
+                print(f"Type         : {b.type_name} (type={b.type})")
+                print(f"Status       : {status}")
+                print(f"Total Space  : {b.total_bytes / (1024*1024):.2f} MB ({b.total_bytes:,} bytes)")
+                print(f"Free Space   : {b.free_bytes / (1024*1024):.2f} MB ({b.free_bytes:,} bytes)")
+                print(f"Used Space   : {b.get_used_bytes() / (1024*1024):.2f} MB ({b.get_usage_percentage():.1f}%)")
+                caps = []
+                for cap_name in ["READ", "WRITE", "DIRECTORIES", "RECURSIVE_DELETE", "RENAME", "COPY", "HASH", "FORMAT", "TIMESTAMPS", "LARGE_FILES", "COMPRESSION", "WEAR_LEVELING"]:
+                    val = getattr(StorageBackendInfo, f"CAP_{cap_name}", None)
+                    if val and b.has_capability(val):
+                        caps.append(cap_name)
+                print(f"Capabilities : {' | '.join(caps)}")
+            else:
+                backends = proto.get_storage_list()
+                print(f"Registered Storage Backends ({len(backends)}):")
+                print(f"  {'Mount':<10} {'Type':<12} {'Status':<10} {'Total':<12} {'Free':<12} {'Used %':<8}")
+                print(f"  {'-'*10} {'-'*12} {'-'*10} {'-'*12} {'-'*12} {'-'*8}")
+                for b in backends:
+                    status = "Mounted" if b.mounted else "Unmounted"
+                    tot_str = f"{b.total_bytes / (1024*1024):.1f} MB" if b.total_bytes > 0 else "N/A"
+                    free_str = f"{b.free_bytes / (1024*1024):.1f} MB" if b.free_bytes > 0 else "N/A"
+                    used_pct = f"{b.get_usage_percentage():.1f}%" if b.total_bytes > 0 else "N/A"
+                    print(f"  {b.mount_point:<10} {b.type_name:<12} {status:<10} {tot_str:<12} {free_str:<12} {used_pct:<8}")
 
         elif args.command == "ls":
             entries = manager.list_directory(args.path)

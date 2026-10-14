@@ -172,6 +172,18 @@ public:
      */
     StorageBackend* get_backend_by_mount(const char* mount_point);
     
+    /**
+     * Get backend for a specific file/directory path.
+     * 
+     * Resolves the path to the matching backend and optionally returns
+     * the path relative to the backend's mount point.
+     * 
+     * @param path           Absolute path (e.g. "/flash/dir/file.txt")
+     * @param relative_path  Optional pointer to receive relative path
+     * @return Pointer to matching backend, or NULL if no backend matches
+     */
+    StorageBackend* get_backend_for_path(const char* path, const char** relative_path = nullptr);
+    
     /* ========================================================================
      * Space Information
      * ====================================================================== */

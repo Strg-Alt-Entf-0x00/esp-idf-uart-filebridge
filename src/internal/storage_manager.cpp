@@ -10,7 +10,6 @@
 #include "esp_log.h"
 #include <cstring>
 
-static const char* TAG = "storage_manager";
 
 /* ============================================================================
  * Constructor / Destructor
@@ -134,6 +133,13 @@ StorageBackend* StorageManager::get_backend(size_t index) {
 
 StorageBackend* StorageManager::get_backend_by_mount(const char* mount_point) {
     return m_registry.get_backend_by_mount(mount_point);
+}
+
+StorageBackend* StorageManager::get_backend_for_path(const char* path, const char** relative_path) {
+    if (!path || !m_initialized) {
+        return nullptr;
+    }
+    return m_registry.resolve_path(path, relative_path);
 }
 
 /* ============================================================================
