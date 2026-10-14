@@ -545,27 +545,27 @@ class BatchRunner:
             # Execute tasks
             for task in self.config.tasks:
                 if not task.enabled:
-                    self.console.print(f"[dim]⊘ {task.name} (disabled)[/dim]")
+                    self.console.print(f"[dim][SKIP] {task.name} (disabled)[/dim]")
                     continue
 
                 # Check if already completed
                 if self.state.is_completed(task.name):
-                    self.console.print(f"[dim]✓ {task.name} (already completed)[/dim]")
+                    self.console.print(f"[dim][DONE] {task.name} (already completed)[/dim]")
                     continue
 
-                self.console.print(f"\n[bold]▶ {task.name}[/bold] ({task.type.value})")
+                self.console.print(f"\n[bold]> {task.name}[/bold] ({task.type.value})")
 
                 result = self.execute_task_with_retry(task)
                 self.results.append(result)
 
                 if result.success:
                     if result.skipped:
-                        self.console.print(f"[yellow]⊘ {result.message}[/yellow]")
+                        self.console.print(f"[yellow][SKIP] {result.message}[/yellow]")
                     else:
-                        self.console.print(f"[green]✓ {result.message}[/green]")
+                        self.console.print(f"[green][OK] {result.message}[/green]")
                         self.state.mark_completed(task.name)
                 else:
-                    self.console.print(f"[red]✗ {result.message}[/red]")
+                    self.console.print(f"[red][FAIL] {result.message}[/red]")
                     self.state.mark_failed(task.name)
 
                     if self.config.options.fail_fast:

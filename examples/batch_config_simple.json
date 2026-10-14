@@ -7,7 +7,7 @@
   },
   "variables": {
     "project_root": "./my_project",
-    "models_path": "models"
+    "data_path": "data"
   },
   "options": {
     "verbose": true,
@@ -16,26 +16,26 @@
   },
   "tasks": [
     {
-      "name": "Create models directory",
+      "name": "Create data directory",
       "type": "mkdir",
-      "path": "/sd/models",
+      "path": "/sd/data",
       "parents": true,
       "ignore_exists": true
     },
     {
-      "name": "Upload all models",
+      "name": "Upload data files",
       "type": "upload_dir",
-      "source": "${project_root}/${models_path}/",
-      "destination": "/sd/models/",
-      "pattern": "*.espdl",
+      "source": "${project_root}/${data_path}/",
+      "destination": "/sd/data/",
+      "pattern": "*.bin",
       "verify": true,
       "overwrite": false,
       "create_dirs": true
     },
     {
-      "name": "List uploaded models",
+      "name": "List uploaded files",
       "type": "list",
-      "path": "/sd/models/"
+      "path": "/sd/data/"
     }
   ]
 }

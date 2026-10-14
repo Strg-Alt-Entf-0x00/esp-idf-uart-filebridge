@@ -36,10 +36,10 @@ def test_multi_backend():
     print(f"\nConnecting to {args.port} @ {args.baud} baud...")
     
     if not protocol.connect(args.port, args.baud):
-        print("❌ Failed to connect!")
+        print("[ERROR] Failed to connect!")
         return 1
     
-    print("✅ Connected!")
+    print("[OK] Connected!")
     
     # Get device info
     print("\n" + "-" * 70)
@@ -58,7 +58,7 @@ def test_multi_backend():
     
     try:
         backends = protocol.get_storage_list()
-        print(f"\n✅ Found {len(backends)} storage backend(s):\n")
+        print(f"\n[OK] Found {len(backends)} storage backend(s):\n")
         
         for i, backend in enumerate(backends, 1):
             print(f"Backend {i}:")
@@ -86,7 +86,7 @@ def test_multi_backend():
             print()
         
     except Exception as e:
-        print(f"❌ STORAGE_LIST failed: {e}")
+        print(f"[ERROR] STORAGE_LIST failed: {e}")
         protocol.disconnect()
         return 1
     
@@ -101,12 +101,12 @@ def test_multi_backend():
         print(f"\nQuerying: {mount_point}")
         try:
             backend = protocol.get_storage_info(mount_point)
-            print(f"  ✅ Type: {backend.type_name}")
-            print(f"  ✅ Total: {format_size(backend.total_bytes)}")
-            print(f"  ✅ Free: {format_size(backend.free_bytes)}")
-            print(f"  ✅ Status: {'Mounted' if backend.mounted else 'Unmounted'}")
+            print(f"  [OK] Type: {backend.type_name}")
+            print(f"  [OK] Total: {format_size(backend.total_bytes)}")
+            print(f"  [OK] Free: {format_size(backend.free_bytes)}")
+            print(f"  [OK] Status: {'Mounted' if backend.mounted else 'Unmounted'}")
         except Exception as e:
-            print(f"  ⚠️  Not available: {e}")
+            print(f"  [WARN] Not available: {e}")
     
     # Test listing directories on different backends
     print("\n" + "-" * 70)
@@ -117,7 +117,7 @@ def test_multi_backend():
         try:
             print(f"\nListing {mount_point}/:")
             entries = protocol.list_directory(mount_point)
-            print(f"  ✅ Found {len(entries)} entries")
+            print(f"  [OK] Found {len(entries)} entries")
             
             # Show first few entries
             for entry in entries[:5]:
@@ -131,17 +131,17 @@ def test_multi_backend():
                 print(f"    ... and {len(entries) - 5} more")
                 
         except Exception as e:
-            print(f"  ⚠️  Cannot list: {e}")
+            print(f"  [WARN] Cannot list: {e}")
     
     # Summary
     print("\n" + "=" * 70)
     print("TEST SUMMARY")
     print("=" * 70)
-    print("✅ Device communication: OK")
-    print(f"✅ Multi-backend discovery: OK ({len(backends)} backends)")
-    print("✅ Individual backend query: OK")
-    print("✅ Multi-backend directory listing: OK")
-    print("\n🎉 ALL TESTS PASSED! Multi-backend system is working!")
+    print("[OK] Device communication: OK")
+    print(f"[OK] Multi-backend discovery: OK ({len(backends)} backends)")
+    print("[OK] Individual backend query: OK")
+    print("[OK] Multi-backend directory listing: OK")
+    print("\nALL TESTS PASSED: Multi-backend system is working.")
     
     protocol.disconnect()
     return None
@@ -150,10 +150,10 @@ if __name__ == "__main__":
     try:
         sys.exit(test_multi_backend() or 0)
     except KeyboardInterrupt:
-        print("\n⚠️  Interrupted by user")
+        print("\nInterrupted by user")
         sys.exit(1)
     except Exception as e:
-        print(f"\n❌ Unexpected error: {e}")
+        print(f"\n[ERROR] Unexpected error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

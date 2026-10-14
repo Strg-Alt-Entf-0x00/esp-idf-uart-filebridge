@@ -36,7 +36,7 @@ TEST_FILES = {
     "small.txt": b"Hello ESP32!",
     "medium.bin": b"\xAA" * 1024,  # 1 KB
     "large.bin": b"\x55" * (100 * 1024),  # 100 KB
-    "unicode.txt": "Test UTF-8: äöü 中文 🚀".encode('utf-8')
+    "unicode.txt": "Test UTF-8: äöü 中文 €§µ".encode('utf-8')
 }
 
 class Colors:

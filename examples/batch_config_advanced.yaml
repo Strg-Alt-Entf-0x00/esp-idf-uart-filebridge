@@ -10,10 +10,10 @@ device:
   timeout: 120
 
 variables:
-  models_dir: "./models"          # Path to your models directory
-  audio_dir: "./audio_samples"    # Path to your audio samples
-  remote_base: "/sd"              # SD card mount point
-  version: "v1.0"                 # Model version
+  data_dir: "./data"              # Path to local data directory
+  assets_dir: "./assets"          # Path to local asset files
+  remote_base: "/sd"              # Target storage mount point (/sd, /flash, /lfs, /spiffs)
+  version: "v1.0"                 # Release version tag
 
 options:
   verbose: true
@@ -31,66 +31,66 @@ tasks:
   - name: "Check available space"
     type: "check_space"
     required_bytes: 10485760  # 10 MB
-    mount_point: "/sd"
+    mount_point: "${remote_base}"
 
   # Cleanup old files (conditional)
   - name: "Cleanup old test files"
     type: "delete"
-    path: "/sd/test_old"
+    path: "${remote_base}/test_old"
     recursive: true
     ignore_missing: true
     condition:
-      file_exists: "/sd/test_old"
+      file_exists: "${remote_base}/test_old"
 
   # Create directory structure
-  - name: "Create models directory"
+  - name: "Create data directory"
     type: "mkdir"
-    path: "${remote_base}/models/${version}"
+    path: "${remote_base}/data/${version}"
     parents: true
     ignore_exists: true
 
-  - name: "Create audio directory"
+  - name: "Create assets directory"
     type: "mkdir"
-    path: "${remote_base}/audio/en"
+    path: "${remote_base}/assets"
     parents: true
     ignore_exists: true
 
-  # Upload models with verification
-  - name: "Upload encoder model"
+  # Upload primary dataset with verification
+  - name: "Upload primary dataset"
     type: "upload"
-    source: "${models_dir}/encoder.espdl"
-    destination: "${remote_base}/models/${version}/encoder.espdl"
+    source: "${data_dir}/dataset_part1.bin"
+    destination: "${remote_base}/data/${version}/dataset_part1.bin"
     verify: true
     overwrite: false
     condition:
-      file_not_exists: "${remote_base}/models/${version}/encoder.espdl"
+      file_not_exists: "${remote_base}/data/${version}/dataset_part1.bin"
     retry:
       max_attempts: 5
       backoff_seconds: 3.0
       exponential_backoff: true
 
-  - name: "Upload decoder model"
+  - name: "Upload secondary dataset"
     type: "upload"
-    source: "${models_dir}/decoder.espdl"
-    destination: "${remote_base}/models/${version}/decoder.espdl"
+    source: "${data_dir}/dataset_part2.bin"
+    destination: "${remote_base}/data/${version}/dataset_part2.bin"
     verify: true
     overwrite: false
     condition:
-      file_not_exists: "${remote_base}/models/${version}/decoder.espdl"
+      file_not_exists: "${remote_base}/data/${version}/dataset_part2.bin"
 
-  # Verify model hashes (example - update with real CRC32 values)
-  - name: "Verify encoder hash"
+  # Verify dataset hash (example - update with real CRC32 value)
+  - name: "Verify dataset hash"
     type: "check_hash"
-    path: "${remote_base}/models/${version}/encoder.espdl"
+    path: "${remote_base}/data/${version}/dataset_part1.bin"
     expected_hash: "0x12345678"
     enabled: false  # Disabled by default (update with real CRC32)
 
-  # Upload audio files selectively
-  - name: "Upload English audio samples"
+  # Upload assets selectively
+  - name: "Upload assets directory"
     type: "upload_dir"
-    source: "${audio_dir}/en/"
-    destination: "${remote_base}/audio/en/"
-    pattern: "*.wav"
+    source: "${assets_dir}/"
+    destination: "${remote_base}/assets/"
+    pattern: "*.bin"
     exclude:
       - "*_backup*"
       - "*_old*"
@@ -117,17 +117,17 @@ tasks:
     overwrite: true
 
   # Final verification
-  - name: "List uploaded models"
+  - name: "List uploaded data"
     type: "list"
-    path: "${remote_base}/models/${version}/"
+    path: "${remote_base}/data/${version}/"
 
-  - name: "List uploaded audio"
+  - name: "List uploaded assets"
     type: "list"
-    path: "${remote_base}/audio/en/"
+    path: "${remote_base}/assets/"
 
   # Verify total size (example - update with real size)
-  - name: "Verify encoder size"
+  - name: "Verify dataset file size"
     type: "verify_size"
-    path: "${remote_base}/models/${version}/encoder.espdl"
+    path: "${remote_base}/data/${version}/dataset_part1.bin"
     expected_size: 1048576  # Example: 1 MB (update with real size)
     enabled: false  # Disabled by default

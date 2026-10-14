@@ -2,7 +2,7 @@
 # Usage: esp-idf-uart-filebridge batch examples/batch_config_simple.yaml
 
 version: "1.0"
-description: "Upload models and audio files to ESP32"
+description: "Upload data files and assets to ESP32"
 
 device:
   port: "COM13"  # Change to your port (Windows: COM13, Linux: /dev/ttyUSB0)
@@ -10,7 +10,7 @@ device:
 
 variables:
   project_root: "./my_project"  # Change to your project path
-  lang: "en"
+  data_type: "bin"
 
 options:
   verbose: true
@@ -20,26 +20,26 @@ options:
 tasks:
   - name: "Create directories"
     type: "mkdir"
-    path: "/sd/models"
+    path: "/sd/data"
     parents: true
     ignore_exists: true
 
-  - name: "Upload encoder model"
+  - name: "Upload primary datafile"
     type: "upload"
-    source: "${project_root}/models/encoder.espdl"
-    destination: "/sd/models/encoder.espdl"
+    source: "${project_root}/data/dataset.bin"
+    destination: "/sd/data/dataset.bin"
     verify: true
     overwrite: false
 
-  - name: "Upload audio samples"
+  - name: "Upload asset files"
     type: "upload_dir"
-    source: "${project_root}/audio_samples/${lang}/"
-    destination: "/sd/audio/"
-    pattern: "*.wav"
+    source: "${project_root}/assets/"
+    destination: "/sd/assets/"
+    pattern: "*.bin"
     verify: false
     overwrite: false
     create_dirs: true
 
   - name: "Verify installation"
     type: "list"
-    path: "/sd/models/"
+    path: "/sd/data/"

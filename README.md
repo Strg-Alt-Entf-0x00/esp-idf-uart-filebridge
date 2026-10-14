@@ -98,6 +98,8 @@ esp-idf-uart-filebridge/
 │   ├── batch_config_simple.yaml   # Simple batch config example
 │   ├── batch_config_advanced.yaml # Advanced batch features
 │   └── batch_config_simple.json   # JSON format example
+├── tools/                         # Build tools and utilities
+│   └── build_all_targets.sh       # Multi-target build script for all ESP32 variants
 ├── tools_py/                      # Python CLI and batch tools
 │   ├── esp_idf_uart_filebridge/
 │   │   ├── batch_config.py        # Pydantic schemas (NEW)
@@ -131,7 +133,7 @@ esp-idf-uart-filebridge/
 - **Full filesystem operations:** upload, download, list, delete, rename, mkdir, copy, hash.
 - **Streaming upload** (no per-chunk ACK) with Hardware Flow Control (RTS/CTS) for maximum throughput.
 - **Log suppression** during transfers for optimal SD card write performance.
-- **Manual serialization:** Cross-platform struct compatibility (C++ ↔ Python)
+- **Manual serialization:** Cross-platform struct compatibility (C++ <-> Python)
 - **Batch System (NEW!)** - Declarative YAML/JSON workflows. Zero custom scripts needed!
   - 11 task types (upload, upload_dir, download, delete, mkdir, rename, copy, check_hash, verify_size, list, check_space)
   - Variable substitution (`${VAR}`)
@@ -160,7 +162,7 @@ pip install -e "tools_py[batch]"
 
 ### Quick Example
 
-**upload_models.yaml:**
+**batch_upload.yaml:**
 ```yaml
 version: "1.0"
 device:
@@ -170,53 +172,49 @@ device:
 tasks:
   - name: "Create directory"
     type: "mkdir"
-    path: "/sd/models"
+    path: "/sd/data"
     parents: true
   
-  - name: "Upload ML models"
+  - name: "Upload data files"
     type: "upload_dir"
-    source: "./models/"
-    destination: "/sd/models/"
-    pattern: "*.espdl"
+    source: "./data/"
+    destination: "/sd/data/"
+    pattern: "*.bin"
     verify: true
   
   - name: "List uploaded files"
     type: "list"
-    path: "/sd/models/"
+    path: "/sd/data/"
 ```
 
 **Execute:**
 ```bash
-esp-idf-uart-filebridge batch upload_models.yaml
+esp-idf-uart-filebridge batch batch_upload.yaml
 ```
 
 **Output:**
 ```
-╭─────────────────────────────────╮
-│ Connected to ESP32-P4           │
-│ FW: 1.0.0 | SD: Yes             │
-╰─────────────────────────────────╯
+[OK] Connected to ESP32-P4
+     FW: 1.0.0 | SD: Yes
 
-▶ Create directory (mkdir)
-[OK] Created directory /sd/models
+> Create directory (mkdir)
+[OK] Created directory /sd/data
 
-▶ Upload ML models (upload_dir)
-⠹ Uploading ━━━━━━━━━━━━ 67% 2/3 files
+> Upload data files (upload_dir)
+Uploading: 100% 3/3 files
 [OK] Uploaded 3 files
 
-▶ List uploaded files (list)
-┏━━━━━━━━━━━━━━━┳━━━━━━┳━━━━━━━━━┓
-┃ Name          ┃ Type ┃ Size    ┃
-┡━━━━━━━━━━━━━━━╇━━━━━━╇━━━━━━━━━┩
-│ encoder.espdl │ FILE │ 524,288 │
-│ decoder.espdl │ FILE │ 262,144 │
-│ vocab.espdl   │ FILE │ 131,072 │
-└───────────────┴──────┴─────────┘
+> List uploaded files (list)
++----------------+------+---------+
+| Name           | Type | Size    |
++----------------+------+---------+
+| data_part1.bin | FILE | 524,288 |
+| data_part2.bin | FILE | 262,144 |
+| config.json    | FILE | 131,072 |
++----------------+------+---------+
 
-╭─────────────────────────────────╮
-│ Total: 3 | Success: 3 | Failed: 0│
-│ Duration: 8.4s                  │
-╰─────────────────────────────────╯
+Summary: Total: 3 | Success: 3 | Failed: 0
+Duration: 8.4s
 ```
 
 ### Supported Task Types (11 Total)
@@ -335,12 +333,12 @@ options:
   dry_run: true
 ```
 
-### Advanced Example: Complete ML Project Deployment
+### Advanced Example: Complete Project Deployment
 
-**deploy_ml_project.yaml:**
+**deploy_project.yaml:**
 ```yaml
 version: "1.0"
-description: "Deploy ML models, audio samples, and config to ESP32"
+description: "Deploy datasets, asset samples, and config to ESP32"
 
 device:
   port: "COM13"  # Change to your port
@@ -349,8 +347,8 @@ device:
 
 variables:
   project_root: "./my_project"              # Your project directory
-  models_dir: "models/output"               # Models subdirectory
-  audio_dir: "audio_samples/generated"      # Audio subdirectory
+  data_dir: "data"                          # Data files subdirectory
+  assets_dir: "assets"                      # Assets subdirectory
   lang: "en"
   version: "v2.1"
 
@@ -382,43 +380,43 @@ tasks:
       file_exists: "/sd/test_old"
   
   # Create directory structure
-  - name: "Create models directory"
+  - name: "Create data directory"
     type: "mkdir"
-    path: "/sd/models/${version}"
+    path: "/sd/data/${version}"
     parents: true
     ignore_exists: true
   
-  - name: "Create audio directory"
+  - name: "Create assets directory"
     type: "mkdir"
-    path: "/sd/audio/${lang}"
+    path: "/sd/assets/${lang}"
     parents: true
     ignore_exists: true
   
-  # Upload models with verification
-  - name: "Upload encoder model"
+  # Upload datasets with verification
+  - name: "Upload primary dataset"
     type: "upload"
-    source: "${project_root}/${models_dir}/encoder.espdl"
-    destination: "/sd/models/${version}/encoder.espdl"
+    source: "${project_root}/${data_dir}/dataset_part1.bin"
+    destination: "/sd/data/${version}/dataset_part1.bin"
     verify: true
     overwrite: false
     condition:
-      file_not_exists: "/sd/models/${version}/encoder.espdl"
+      file_not_exists: "/sd/data/${version}/dataset_part1.bin"
   
-  - name: "Upload decoder model"
+  - name: "Upload secondary dataset"
     type: "upload"
-    source: "${project_root}/${models_dir}/decoder.espdl"
-    destination: "/sd/models/${version}/decoder.espdl"
+    source: "${project_root}/${data_dir}/dataset_part2.bin"
+    destination: "/sd/data/${version}/dataset_part2.bin"
     verify: true
     overwrite: false
     condition:
-      file_not_exists: "/sd/models/${version}/decoder.espdl"
+      file_not_exists: "/sd/data/${version}/dataset_part2.bin"
   
-  # Upload audio samples with filtering
-  - name: "Upload audio samples"
+  # Upload asset files with filtering
+  - name: "Upload asset files"
     type: "upload_dir"
-    source: "${project_root}/${audio_dir}/${lang}/"
-    destination: "/sd/audio/${lang}/"
-    pattern: "*.wav"
+    source: "${project_root}/${assets_dir}/${lang}/"
+    destination: "/sd/assets/${lang}/"
+    pattern: "*.bin"
     exclude:
       - "*_backup*"
       - "*_old*"
@@ -443,30 +441,30 @@ tasks:
     overwrite: true
   
   # Verification
-  - name: "List uploaded models"
+  - name: "List uploaded data"
     type: "list"
-    path: "/sd/models/${version}/"
+    path: "/sd/data/${version}/"
   
-  - name: "List uploaded audio"
+  - name: "List uploaded assets"
     type: "list"
-    path: "/sd/audio/${lang}/"
+    path: "/sd/assets/${lang}/"
   
-  # Optional: Verify model integrity
-  - name: "Verify encoder hash"
+  # Optional: Verify dataset integrity
+  - name: "Verify dataset hash"
     type: "check_hash"
-    path: "/sd/models/${version}/encoder.espdl"
+    path: "/sd/data/${version}/dataset_part1.bin"
     expected_hash: "0x12345678"
     enabled: false  # Disabled by default (update with real CRC32)
 ```
 
 **Execute:**
 ```bash
-esp-idf-uart-filebridge batch deploy_ml_project.yaml
+esp-idf-uart-filebridge batch deploy_project.yaml
 ```
 
 **With variable overrides:**
 ```bash
-esp-idf-uart-filebridge batch deploy_ml_project.yaml \
+esp-idf-uart-filebridge batch deploy_project.yaml \
   -V version=v2.2 \
   -V lang=de \
   -V project_root=/path/to/backup/project
@@ -514,7 +512,7 @@ Now VS Code provides autocomplete, validation, and inline documentation while ed
 
 Prefer JSON? Same features, different syntax:
 
-**upload_models.json:**
+**batch_upload.json:**
 ```json
 {
   "version": "1.0",
@@ -523,14 +521,14 @@ Prefer JSON? Same features, different syntax:
     "baud": 3000000
   },
   "variables": {
-    "project": "D:/my_project"
+    "project": "./my_project"
   },
   "tasks": [
     {
-      "name": "Upload models",
+      "name": "Upload data files",
       "type": "upload_dir",
-      "source": "${project}/models/",
-      "destination": "/sd/models/",
+      "source": "${project}/data/",
+      "destination": "/sd/data/",
       "verify": true
     }
   ]
@@ -828,12 +826,46 @@ cfg.baud_rate = 3000000;
 ESP_ERROR_CHECK(esp_idf_uart_filebridge_init(&cfg));
 ```
 
-### 3. Try the Example
+### 3. Build and Flash
 
+#### Build for a Specific Target
+Navigate to the example project and configure your target architecture:
 ```bash
 cd examples/basic_transfer
-idf.py build flash monitor
+
+# Set the target (esp32, esp32s3, esp32c6, esp32p4, etc.)
+idf.py set-target esp32s3
+
+# Build the firmware
+idf.py build
+
+# Flash and open serial monitor (replace COM4 with your port)
+idf.py -p COM4 flash monitor
 ```
+
+#### Multi-Target Automated Build Script
+To build firmware binaries for all 7 supported ESP32 target families sequentially:
+```bash
+# Ensure ESP-IDF environment is activated (. $IDF_PATH/export.sh)
+./tools/build_all_targets.sh
+```
+The script compiles each target, copies output binaries (`esp32_uart_filebridge.bin`, `esp32s3_uart_filebridge.bin`, `esp32c6_uart_filebridge.bin`, etc.) to `examples/basic_transfer/build_output/`, and generates `BUILD_REPORT.txt`.
+
+#### Target Hardware & Default Pinout Reference
+| Target | Architecture | Flash Size | RAM | Default UART Pins | Target Characteristics |
+|---|---|---|---|---|---|
+| **ESP32** | Xtensa LX6 Dual-core 240 MHz | 4MB | 520 KB | GPIO17 (TX), GPIO16 (RX), GPIO5 (RTS), GPIO18 (CTS) | Standard ESP32 classic boards |
+| **ESP32-S2** | Xtensa LX7 Single-core 240 MHz | 4MB | 320 KB | GPIO17 (TX), GPIO18 (RX), GPIO19 (RTS), GPIO20 (CTS) | USB OTG native support |
+| **ESP32-S3** | Xtensa LX7 Dual-core 240 MHz | 8MB | 512 KB | GPIO17 (TX), GPIO18 (RX), GPIO19 (RTS), GPIO20 (CTS) | Vector instructions, USB-Serial/JTAG |
+| **ESP32-C3** | RISC-V 32-bit Single-core 160 MHz | 4MB | 400 KB | GPIO6 (TX), GPIO7 (RX), GPIO4 (RTS), GPIO5 (CTS) | Cost-effective IoT |
+| **ESP32-C6** | RISC-V 32-bit Single-core 160 MHz | 4MB | 512 KB | GPIO6 (TX), GPIO7 (RX), GPIO4 (RTS), GPIO5 (CTS) | Wi-Fi 6, BLE 5.3, USB-Serial/JTAG |
+| **ESP32-H2** | RISC-V 32-bit Single-core 96 MHz | 4MB | 320 KB | GPIO6 (TX), GPIO7 (RX), GPIO4 (RTS), GPIO5 (CTS) | BLE 5.3 + 802.15.4 (Zigbee/Thread) |
+| **ESP32-P4** | RISC-V 64-bit Dual-core 360 MHz | 32MB | 768 KB | GPIO30 (TX), GPIO31 (RX), GPIO50 (RTS), GPIO29 (CTS) | High performance, MIPI-CSI/DSI, SDIO |
+
+#### Build Troubleshooting
+- **`set-target failed`**: Ensure you are using ESP-IDF v5.3 or later for modern targets (ESP32-C6, ESP32-P4, ESP32-H2).
+- **`partition too small`**: Increase the factory partition size in `partitions_*.csv` or enable size optimization (`CONFIG_COMPILER_OPTIMIZATION_SIZE=y`).
+- **`idf.py: command not found`**: Ensure the ESP-IDF environment is activated (`. $IDF_PATH/export.sh` on Linux/macOS or via ESP-IDF Command Prompt / PowerShell on Windows).
 
 ### 4. Install Python Tools
 
@@ -1168,27 +1200,27 @@ py -3 -m esp_idf_uart_filebridge.cli --port COM13 mkdir /sd/test
 
 **6. Upload a file from the PC to the ESP32 SD card:**
 ```bash
-py -3 -m esp_idf_uart_filebridge.cli --port COM13 upload "D:\SOURCE\file.bin" "/sd/test/file.bin" --verify
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 upload "./data/file.bin" "/sd/test/file.bin" --verify
 ```
 
 **7. Download a file from the ESP32 SD card to the PC:**
 ```bash
-py -3 -m esp_idf_uart_filebridge.cli --port COM13 download "/sd/models/model.bin" "D:\Temp\model_copy.bin"
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 download "/sd/test/file.bin" "./downloads/file_copy.bin"
 ```
 
 **8. Upload a complete directory from the PC to the SD card:**
 ```bash
-py -3 -m esp_idf_uart_filebridge.cli --port COM13 upload_dir "D:\MyDirectory" "/sd/mydirectory"
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 upload_dir "./my_folder" "/sd/my_folder"
 ```
 
 **9. Show file information:**
 ```bash
-py -3 -m esp_idf_uart_filebridge.cli --port COM13 stat /sd/models/modell.bin
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 stat /sd/test/file.bin
 ```
 
 **10. Show a file's CRC32 checksum:**
 ```bash
-py -3 -m esp_idf_uart_filebridge.cli --port COM13 hash /sd/models/modell.bin
+py -3 -m esp_idf_uart_filebridge.cli --port COM13 hash /sd/test/file.bin
 ```
 
 **11. Delete a file or directory:**

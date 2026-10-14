@@ -122,17 +122,17 @@ build_target() {
             # Copy binary to output
             cp "$binary_path" "${OUTPUT_DIR}/${target}_uart_filebridge.bin"
             
-            echo -e "${GREEN}✓ Build successful for ${target}${NC}"
+            echo -e "${GREEN}[OK] Build successful for ${target}${NC}"
             echo -e "${GREEN}  Binary size: $(format_size $size)${NC}"
             echo -e "${GREEN}  Build time: ${duration}s${NC}"
             BUILD_STATUS[$target]="SUCCESS"
         else
-            echo -e "${RED}✗ Binary not found for ${target}${NC}"
+            echo -e "${RED}[FAILED] Binary not found for ${target}${NC}"
             BUILD_STATUS[$target]="FAILED (no binary)"
             return 1
         fi
     else
-        echo -e "${RED}✗ Build failed for ${target}${NC}"
+        echo -e "${RED}[FAILED] Build failed for ${target}${NC}"
         BUILD_STATUS[$target]="FAILED (compilation)"
         return 1
     fi

@@ -15,9 +15,7 @@ __pycache__/
 dist/
 .venv/
 
-# Development documentation (keep local, except specific files)
-.docs/*
-.kiro/
+
 
 # IDE/Editor specific files
 .clangd
