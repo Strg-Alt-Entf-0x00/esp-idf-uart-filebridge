@@ -806,7 +806,55 @@ Then run: `idf.py update-dependencies`
 
 *(For local development, you can use `path: "../esp-idf-uart-filebridge"` instead of `git`)*
 
-### 2. Initialize in Your Firmware
+### 2. Configure Storage Backends (Optional)
+
+The filebridge supports selective backend compilation to minimize dependencies and build time. By default, all backends are enabled, but you can disable unused backends to reduce download size and compilation time.
+
+Available Backends:
+- SD/FAT: Always available (uses ESP-IDF built-in FAT filesystem)
+- Flash/FAT: Always available (uses ESP-IDF wear leveling on internal flash)
+- SPIFFS: Always available (uses ESP-IDF built-in SPIFFS)
+- LittleFS: Optional dependency - only downloaded and compiled if enabled (default: enabled)
+
+Conditional Dependency System:
+LittleFS uses ESP-IDF Component Manager conditional dependencies. The joltwallet/littlefs component is only downloaded when CONFIG_UART_FILEBRIDGE_BACKEND_LITTLEFS is enabled in menuconfig. This reduces managed_components download size by approximately 2 MB when disabled.
+
+To disable LittleFS:
+
+```bash
+cd examples/basic_transfer  # or your project directory
+idf.py menuconfig
+# Navigate: Component config → ESP UART File Bridge → Storage Backend Configuration → LittleFS Backend
+# Uncheck "Enable LittleFS backend"
+# Save (S) and exit (Q)
+idf.py build
+```
+
+When LittleFS is disabled:
+- joltwallet/littlefs component will not be downloaded
+- storage_littlefs.cpp will not be compiled
+- Binary size reduced by approximately 50-80 KB
+- Build time reduced by 5-10%
+- /lfs/ mount point will not be available at runtime
+
+Recommended configurations by use case:
+- SD-only projects: Disable Flash/FAT, LittleFS, and SPIFFS
+- Flash-only projects: Disable SD/FAT, enable Flash/FAT or LittleFS
+- Minimal binary size: Enable only required backends
+
+ESP-IDF version requirements for conditional dependencies:
+- ESP-IDF 5.5 or later: Full support for conditional dependencies
+- ESP-IDF 5.3.5 to 5.4.x: Full support (includes Kconfig condition patches)
+- ESP-IDF 5.2.0 to 5.3.4: Partial support (LittleFS always downloads but can be disabled at runtime)
+- ESP-IDF below 5.2.0: Not supported
+
+Technical implementation:
+The conditional dependency is defined in idf_component.yml using the matches field with Kconfig option evaluation. CMakeLists.txt conditionally includes storage_littlefs.cpp and links joltwallet__littlefs only when the Kconfig option is enabled. This follows standard ESP-IDF Component Manager patterns for optional dependencies.
+
+Migration from version 1.x:
+No changes required. LittleFS is enabled by default (default y in Kconfig), maintaining backward compatibility. Existing projects continue working without modification. Users can optionally disable LittleFS via menuconfig to reduce dependencies.
+
+### 3. Initialize in Your Firmware
 
 ```c
 #include "esp_idf_uart_filebridge.h"
