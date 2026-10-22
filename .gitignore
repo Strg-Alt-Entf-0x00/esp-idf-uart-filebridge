@@ -1,29 +1,35 @@
-# Build directories
+# ==============================================================================
+# ESP-IDF Build Artifacts
+# ==============================================================================
 build/
 build-*/
-
-# ESP-IDF managed components (auto-downloaded)
 managed_components/
-
-# ESP-IDF dependency lock files
 dependencies.lock
+sdkconfig
+sdkconfig.old
+sdkconfig.defaults.old
 
+# ==============================================================================
 # Python
-__pycache__/
+# ==============================================================================
 *.pyc
+*.py[cod]
+__pycache__/
 *.egg-info/
 dist/
 .venv/
 
-
-
-# IDE/Editor specific files
+# ==============================================================================
+# IDE and Editor
+# ==============================================================================
 .clangd
-.vscode/
 .cache/
-.docs/
+.vscode/
 
-# ESP-IDF generated configuration
-sdkconfig
-sdkconfig.old
-sdkconfig.defaults.old
+# ==============================================================================
+# Reference and Archive Code
+# ==============================================================================
+.archive/
+.docs/
+.old_code/
+.reference_codes/
