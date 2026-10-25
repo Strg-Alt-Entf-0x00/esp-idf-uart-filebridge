@@ -1,5 +1,7 @@
 # esp-idf-uart-filebridge
 
+[Changelog](CHANGELOG.md)
+
 Universal ESP32 UART File Bridge - High-performance file transfer between ESP32 and host PC over UART with multi-backend storage support.
 
 ## Key Features
