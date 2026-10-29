@@ -7,6 +7,7 @@
 #include "storage_sd_fat.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
+#include "esp_idf_version.h"
 #include "soc/soc_caps.h"
 #if SOC_SDMMC_HOST_SUPPORTED
 #include "driver/sdmmc_host.h"
@@ -28,8 +29,25 @@
 #define CONFIG_UART_FILEBRIDGE_SD_MAX_FILES 5
 #endif
 
+#if defined(CONFIG_IDF_TARGET_ESP32P4) && \
+    defined(CONFIG_ESP_HOSTED_HOST_TRANSPORT_BUS_SDIO) && \
+    ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+#define FILEBRIDGE_HOSTED_SDMMC_SHARED_HOST 1
+static esp_err_t hosted_sdmmc_host_init()
+{
+    return ESP_OK;
+}
 
-/* ============================================================================
+static esp_err_t hosted_sdmmc_host_deinit()
+{
+    return ESP_OK;
+}
+#else
+#define FILEBRIDGE_HOSTED_SDMMC_SHARED_HOST 0
+#endif
+
+
+/* ============================================================================ 
  * Constructor / Destructor
  * ========================================================================= */
 
@@ -107,6 +125,14 @@ esp_err_t StorageSDFAT::mount() {
     // Configure SDMMC host
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
     host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;  // 40 MHz
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+    host.slot = SDMMC_HOST_SLOT_0;
+#endif
+#if FILEBRIDGE_HOSTED_SDMMC_SHARED_HOST
+    // ESP-Hosted already initialized the shared P4 SDMMC controller for Slot 1.
+    host.init = hosted_sdmmc_host_init;
+    host.deinit = hosted_sdmmc_host_deinit;
+#endif
     
     esp_err_t ret = ESP_OK;
 

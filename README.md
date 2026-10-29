@@ -149,6 +149,14 @@ esp-idf-uart-filebridge/
 - **WebDAV Server** (optional) - Mount ESP32 as network drive for drag-and-drop file management
 - **Multi-target:** ESP32, ESP32-S3, ESP32-C6, ESP32-P4 (P4 LDO power control via Kconfig)
 
+On ESP32-P4 with ESP-IDF 6.x and ESP-Hosted over SDIO, the SD card uses
+SDMMC Slot 0 while ESP-Hosted reserves Slot 1. The filebridge preserves the
+already-initialized shared SDMMC controller in this configuration so both
+devices can coexist. Call the explicit SD mount API from a task with an
+adequate stack; the UART runtime's lazy initialization uses its configured RX
+task stack. Mount errors are returned to the caller, and a later explicit
+mount request can retry a card that was not ready on the first attempt.
+
 ---
 
 ## Batch System - Declarative Workflows (No More Custom Scripts!)

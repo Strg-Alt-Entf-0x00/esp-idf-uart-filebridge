@@ -151,7 +151,8 @@ esp_err_t esp_idf_uart_filebridge_resume(void);
  * @note Ensure the calling task has sufficient stack space (~6-8 KB) as SDMMC 
  *       mounting can be stack-heavy.
  * 
- * @return ESP_OK on success, ESP_ERR_INVALID_STATE if bridge not initialized.
+ * @return ESP_OK on success, ESP_ERR_INVALID_STATE if bridge is not initialized,
+ *         or the storage backend's mount error if the SD card cannot be mounted.
  */
 esp_err_t esp_idf_uart_filebridge_mount_sd(void);
 
@@ -182,4 +183,3 @@ class StorageManager;
 StorageManager* esp_idf_uart_filebridge_get_storage_manager(void);
 
 #endif
-

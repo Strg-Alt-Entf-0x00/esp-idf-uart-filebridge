@@ -321,7 +321,23 @@ extern "C" esp_err_t esp_idf_uart_filebridge_mount_sd(void) {
     if (!s_running) {
         return ESP_ERR_INVALID_STATE;
     }
-    return ensure_runtime_ready();
+    esp_err_t ret = ensure_runtime_ready();
+    if (ret != ESP_OK || !s_cfg.mount_sd_own) {
+        return ret;
+    }
+    if (!s_storage_manager) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    StorageBackend *backend =
+        s_storage_manager->get_backend_by_mount(s_cfg.sd_mount_point);
+    if (!backend) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (backend->is_mounted()) {
+        return ESP_OK;
+    }
+    return backend->mount();
 }
 
 #ifdef __cplusplus
