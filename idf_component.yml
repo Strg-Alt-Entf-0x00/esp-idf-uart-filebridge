@@ -14,10 +14,10 @@ dependencies:
       - if: "$CONFIG{UART_FILEBRIDGE_BACKEND_LITTLEFS} == True"
 
 files:
-  include:
-    - "include/**/*"
-    - "src/**/*"
-    - "CMakeLists.txt"
-    - "Kconfig"
-    - "README.md"
-    - "LICENSE"
+  exclude:
+    - "**/.*"
+    - "**/.*/**/*"
+    - "**/venv/**/*"
+    - "**/*.egg-info/**/*"
+    - "**/*.old"
+    - "**/*.bak"

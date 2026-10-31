@@ -1133,7 +1133,7 @@ esp-idf-uart-filebridge --port COM13 webdav \
 
 ## CLI Tutorial & AI Agent Instructions
 
-This section serves as both a human tutorial and a strict set of rules for any Autonomous AI Agents (like Antigravity) interacting with this component.
+This section serves as both a human tutorial and a strict set of rules for any Autonomous AI Agents interacting with this component.
 
 **AI SYSTEM RULES (CRITICAL):**
 When an AI agent is tasked with transferring files to the ESP32 using this bridge, it MUST follow these rules without experimenting:
