@@ -1,13 +1,6 @@
-# ESP-IDF sdkconfig defaults
-# Example: esp-idf-uart-filebridge / examples/basic_transfer
-# Hardware-specific options must match the target board and ESP-IDF version.
-# Entries and values are preserved; sections are ordered for easier review.
-
 # ============================================================================
-# Common Configuration (applies to all chips)
+# Common Configuration
 # ============================================================================
-# This file contains shared defaults across all ESP32 variants.
-# Chip-specific settings are in sdkconfig.defaults.{chip} files.
 
 # ============================================================================
 # Storage Backend Configuration (v2.0 Multi-Backend Support)
