@@ -29,13 +29,13 @@ class ESP32FileManager:
             self.baud = baud or 3000000
             self.proto = proto
 
-    def connect(self) -> bool:
+    def connect(self, rtscts: bool = True) -> bool:
         """Connect when the manager was constructed with a serial port."""
         if not self.port:
             raise RuntimeError("A port is required when using connect()")
 
         for attempt in range(3):
-            if self.proto.connect(self.port, self.baud):
+            if self.proto.connect(self.port, self.baud, rtscts=rtscts):
                 return True
             if attempt < 2:
                 import time

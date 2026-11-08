@@ -33,6 +33,10 @@
 static const char *TAG = "multi_backend_example";
 
 extern "C" void app_main(void) {
+    printf("\n\n=== ESP32-S3 UART Filebridge Starting ===\n");
+    printf("Console on UART0 via CH340 (COM port on board)\n");
+    printf("Filebridge on UART1 GPIO4/5/6/7 (FT232R)\n\n");
+    
     /* NVS required by some IDF subsystems */
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -41,23 +45,22 @@ extern "C" void app_main(void) {
     }
     ESP_ERROR_CHECK(ret);
 
-    /* Initialize file bridge with SD backend (default) */
+    /* Initialize file bridge (SD will NOT be automatically mounted) */
     esp_idf_uart_filebridge_config_t cfg = ESP_IDF_UART_FILEBRIDGE_CONFIG_DEFAULT();
+    cfg.mount_sd_own = false;  // Don't mount SD card automatically
     ESP_ERROR_CHECK(esp_idf_uart_filebridge_init(&cfg));
     
-    ESP_LOGI(TAG, "UART file bridge initialized with SD backend at /sd");
-
-    /* Explicitly mount SD to initialize storage manager */
-    ESP_LOGI(TAG, "Mounting SD card to initialize storage manager...");
-    ret = esp_idf_uart_filebridge_mount_sd();
+    ESP_LOGI(TAG, "UART file bridge initialized (SD auto-mount disabled)");
+    
+    /* Initialize storage manager manually without SD */
+    ret = esp_idf_uart_filebridge_init_storage_manager();
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "SD mount failed: %s (continuing anyway)", esp_err_to_name(ret));
-    } else {
-        ESP_LOGI(TAG, "SD card mounted successfully");
+        ESP_LOGE(TAG, "Failed to initialize storage manager: %s", esp_err_to_name(ret));
+        return;
     }
-
+    
     /* Wait a bit for initialization to complete */
-    vTaskDelay(pdMS_TO_TICKS(500));
+    vTaskDelay(pdMS_TO_TICKS(100));
 
     /* Get storage manager to register additional backends */
     StorageManager* storage_mgr = esp_idf_uart_filebridge_get_storage_manager();
@@ -65,6 +68,8 @@ extern "C" void app_main(void) {
         ESP_LOGE(TAG, "Failed to get storage manager - backend registration unavailable");
         return;
     }
+    
+    ESP_LOGI(TAG, "Storage manager initialized successfully");
 
 #ifdef CONFIG_UART_FILEBRIDGE_BACKEND_SPIFFS
     /* Register SPIFFS backend at /spiffs */
@@ -162,10 +167,9 @@ extern "C" void app_main(void) {
 
     ESP_LOGI(TAG, "Multi-backend system ready!");
     ESP_LOGI(TAG, "Test backends with Python CLI:");
-    ESP_LOGI(TAG, "  esp-idf-uart-filebridge storage --port COM13");
-    ESP_LOGI(TAG, "  esp-idf-uart-filebridge upload test.txt /spiffs/test.txt --port COM13");
-    ESP_LOGI(TAG, "  esp-idf-uart-filebridge download /spiffs/test.txt output.txt --port COM13");
-
+    ESP_LOGI(TAG, "  esp-idf-uart-filebridge storage --port <PORT>");
+    ESP_LOGI(TAG, "  esp-idf-uart-filebridge upload test.txt /spiffs/test.txt --port <PORT>");
+    ESP_LOGI(TAG, "  esp-idf-uart-filebridge download /spiffs/test.txt output.txt --port <PORT>");
     /* Application loop - bridge runs in background RX task */
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10000));

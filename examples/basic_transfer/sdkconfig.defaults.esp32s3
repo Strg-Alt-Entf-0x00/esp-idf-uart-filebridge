@@ -1,19 +1,36 @@
 # ============================================================================
-# ESP32-S3 Hardware Target Configuration
+# ESP32-S3 Minimal Working Configuration for UART Filebridge
 # ============================================================================
-# Flash: 16MB (Detected on board)
-# USB Port: Native USB-Serial/JTAG (Console/Log on COM3)
-# COM Port: CH343 USB-UART chip on UART0 (Filebridge on COM6)
-# RAM: 512 KB SRAM + 8MB PSRAM
+# Tested with: ESP32-S3-DevKitC-1, ESP-IDF v6.0.2, FT232R @ 3 Mbit/s
+#
+# HARDWARE SETUP:
+#   - Console: UART0 on GPIO43/44 via CH340 (COM6 @ 115200 baud) - for monitoring
+#   - Filebridge: UART1 on GPIO4/5/6/7 (COM13 @ 3000000 baud via FT232R)
+#   - NO SD card on this board
+#
+# WIRING (FT232R to ESP32-S3):
+#   ESP32-S3 TX (GPIO 4)  -> FT232R RX
+#   ESP32-S3 RX (GPIO 5)  <- FT232R TX
+#   ESP32-S3 RTS (GPIO 6) -> FT232R CTS (CROSSED!)
+#   ESP32-S3 CTS (GPIO 7) <- FT232R RTS (CROSSED!)
+#   ESP32-S3 GND          -- FT232R GND
+# ============================================================================
 
 # ============================================================================
-# Console Configuration (Route to native USB-Serial/JTAG)
+# Console Output - UART0 on GPIO43/44 (CH340 = COM6)
 # ============================================================================
-CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_NUM=0
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
+# IMPORTANT: Enable verbose logging to see all boot messages
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_LEVEL_VERBOSE=y
+CONFIG_BOOTLOADER_LOG_LEVEL_VERBOSE=y
+
 # ============================================================================
-# Flash Configuration (16 MB)
+# Flash Size
 # ============================================================================
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
@@ -25,27 +42,50 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_16mb.csv"
 
 # ============================================================================
-# UART File Bridge Component Configuration (UART0 on CH343)
+# UART File Bridge - UART1 with Hardware Flow Control
 # ============================================================================
-CONFIG_UART_FILEBRIDGE_NUM=0
-CONFIG_UART_FILEBRIDGE_TX_PIN=43
-CONFIG_UART_FILEBRIDGE_RX_PIN=44
-CONFIG_UART_FILEBRIDGE_RTS_PIN=-1
-CONFIG_UART_FILEBRIDGE_CTS_PIN=-1
+CONFIG_UART_FILEBRIDGE_NUM=1
+CONFIG_UART_FILEBRIDGE_TX_PIN=4
+CONFIG_UART_FILEBRIDGE_RX_PIN=5
+CONFIG_UART_FILEBRIDGE_RTS_PIN=6
+CONFIG_UART_FILEBRIDGE_CTS_PIN=7
 CONFIG_UART_FILEBRIDGE_BAUD=3000000
 CONFIG_UART_FILEBRIDGE_RX_BUF_SIZE=16384
 CONFIG_UART_FILEBRIDGE_TX_BUF_SIZE=16384
 
 # ============================================================================
-# SD Card Configuration
+# SD Card - DISABLED (no SD card on this ESP32-S3 board)
 # ============================================================================
 CONFIG_UART_FILEBRIDGE_SD_MOUNT_POINT="/sd"
-CONFIG_UART_FILEBRIDGE_SD_MOUNT_OWN=y
+CONFIG_UART_FILEBRIDGE_SD_MOUNT_OWN=n
 CONFIG_UART_FILEBRIDGE_SD_MAX_FILES=5
 
 # ============================================================================
-# Performance (Dual core, more RAM)
+# Storage Backends - Internal Flash Only
+# ============================================================================
+CONFIG_UART_FILEBRIDGE_BACKEND_SPIFFS=y
+CONFIG_UART_FILEBRIDGE_SPIFFS_MOUNT_POINT="/spiffs"
+CONFIG_UART_FILEBRIDGE_SPIFFS_PARTITION="spiffs"
+CONFIG_UART_FILEBRIDGE_SPIFFS_MAX_FILES=5
+
+CONFIG_UART_FILEBRIDGE_BACKEND_FLASH_FAT=y
+CONFIG_UART_FILEBRIDGE_FLASH_FAT_MOUNT_POINT="/flash"
+CONFIG_UART_FILEBRIDGE_FLASH_FAT_PARTITION="flash"
+CONFIG_UART_FILEBRIDGE_FLASH_FAT_MAX_FILES=5
+
+CONFIG_UART_FILEBRIDGE_BACKEND_LITTLEFS=y
+CONFIG_UART_FILEBRIDGE_LITTLEFS_MOUNT_POINT="/lfs"
+CONFIG_UART_FILEBRIDGE_LITTLEFS_PARTITION="littlefs"
+CONFIG_UART_FILEBRIDGE_LITTLEFS_MAX_FILES=5
+
+# ============================================================================
+# Performance
 # ============================================================================
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 CONFIG_FREERTOS_UNICORE=n
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 
+# ============================================================================
+# PSRAM - DISABLED (avoid potential boot issues)
+# ============================================================================
+# CONFIG_SPIRAM is not set
