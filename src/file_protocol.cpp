@@ -410,20 +410,24 @@ void FileProtocol::abort_active_transfer() {
 // ============================================================================
 
 void FileProtocol::handle_hello() {
-    if (m_transfer_active || m_transfer_temp_path[0] != '\0') {
-        ESP_LOGW(TAG, "Aborting dangling transfer on HELLO");
+    // Industrial-Grade: Clean abort of dangling transfers on new connection
+    // Only log warning if there was ACTUALLY an active transfer
+    if (m_transfer_active) {
+        ESP_LOGW(TAG, "Aborting active transfer on HELLO (previous connection died)");
+        abort_active_transfer();
+    } else if (m_transfer_temp_path[0] != '\0') {
+        // Silent cleanup of leftover temp files from crashed connections
         abort_active_transfer();
     }
 
-    ESP_LOGI(TAG, "=== HANDLE_HELLO START ===");
-    ESP_LOGI(TAG, "Sending ACK response...");
+    ESP_LOGD(TAG, "HELLO handshake");
     esp_err_t ret = send_ack();
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "ACK sent successfully");
+        ESP_LOGD(TAG, "ACK sent successfully");
     } else {
         ESP_LOGE(TAG, "ACK send failed: %d", ret);
     }
-    ESP_LOGI(TAG, "=== HANDLE_HELLO END ===");
+    ESP_LOGD(TAG, "HELLO complete");
 }
 
 void FileProtocol::handle_device_info() {
@@ -552,10 +556,18 @@ void FileProtocol::handle_list_begin(const uint8_t* payload, uint16_t length) {
     // Send ACK first
     send_ack();
     
-    // List directory entries
+    // List directory entries with periodic yielding for watchdog
+    // Industrial-Grade: Track entry count to yield CPU every N entries
+    struct CallbackContext {
+        FileProtocol* protocol;
+        uint32_t entry_count;
+    };
+    CallbackContext ctx = { this, 0 };
+    
     auto callback = [](const char* name, uint64_t size, bool is_dir, 
                       uint32_t timestamp, void* user_data) {
-        FileProtocol* self = static_cast<FileProtocol*>(user_data);
+        CallbackContext* ctx = static_cast<CallbackContext*>(user_data);
+        FileProtocol* self = ctx->protocol;
         
         FileEntry entry = {};
         strncpy(entry.name, name, sizeof(entry.name) - 1);
@@ -564,9 +576,14 @@ void FileProtocol::handle_list_begin(const uint8_t* payload, uint16_t length) {
         entry.is_directory = is_dir ? 1 : 0;
         
         self->send_frame(CMD_LIST_ENTRY, &entry, sizeof(entry));
+        
+        // Yield CPU every 20 entries to prevent watchdog timeout on large directories
+        if ((++ctx->entry_count % 20) == 0) {
+            taskYIELD();
+        }
     };
     
-    esp_err_t ret = m_storage_manager->list_directory(path, callback, this);
+    esp_err_t ret = m_storage_manager->list_directory(path, callback, &ctx);
     
     if (ret != ESP_OK) {
         send_error(ERR_FILE_NOT_FOUND);
@@ -996,13 +1013,20 @@ void FileProtocol::handle_delete(const uint8_t* payload, uint16_t length) {
     }
     
     const char* path = reinterpret_cast<const char*>(payload);
-    ESP_LOGI(TAG, "DELETE: %s", path);
+    ESP_LOGD(TAG, "DELETE: %s", path);
     
     // Check if target is a directory
     uint64_t size = 0;
     uint32_t timestamp = 0;
     bool is_dir = false;
     esp_err_t stat_ret = m_storage_manager->stat_file(path, &size, &timestamp, &is_dir);
+    
+    // Industrial-Grade: Handle file-not-found gracefully (idempotent delete)
+    if (stat_ret == ESP_ERR_NOT_FOUND) {
+        ESP_LOGD(TAG, "DELETE: file not found (already deleted): %s", path);
+        send_ack();  // Idempotent: ACK even if file doesn't exist
+        return;
+    }
     
     esp_err_t ret;
     if (stat_ret == ESP_OK && is_dir) {
@@ -1017,9 +1041,12 @@ void FileProtocol::handle_delete(const uint8_t* payload, uint16_t length) {
     if (ret == ESP_OK) {
         send_ack();
     } else if (ret == ESP_ERR_NOT_FOUND) {
-        send_error(ERR_FILE_NOT_FOUND);  // Proper error code for file not found
+        // Idempotent: treat as success if file disappeared during operation
+        ESP_LOGD(TAG, "DELETE: file vanished during operation: %s", path);
+        send_ack();
     } else {
-        send_error(ERR_IO_ERROR);  // Real I/O errors
+        ESP_LOGE(TAG, "DELETE failed: %s (error=%d)", path, ret);
+        send_error(ERR_IO_ERROR);  // Real I/O errors only
     }
 }
 

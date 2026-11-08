@@ -340,6 +340,57 @@ extern "C" esp_err_t esp_idf_uart_filebridge_mount_sd(void) {
     return backend->mount();
 }
 
+extern "C" esp_err_t esp_idf_uart_filebridge_init_storage_manager(void) {
+    if (!s_running) {
+        ESP_LOGE(TAG, "Cannot init storage manager - bridge not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    if (s_runtime_ready) {
+        ESP_LOGD(TAG, "Storage manager already initialized");
+        return ESP_OK;
+    }
+
+    /* Initialize StorageManager without mounting SD */
+    if (!s_storage_manager) {
+        s_storage_manager = new (std::nothrow) StorageManager();
+        if (!s_storage_manager) {
+            ESP_LOGE(TAG, "StorageManager allocation failed");
+            return ESP_ERR_NO_MEM;
+        }
+        
+        /* Initialize storage manager but skip SD mounting */
+        esp_err_t fs_ret = s_storage_manager->init(s_cfg.sd_mount_point, false);
+        if (fs_ret != ESP_OK && fs_ret != ESP_ERR_NOT_FOUND) {
+            ESP_LOGW(TAG, "Storage init returned: %s", esp_err_to_name(fs_ret));
+        }
+    }
+
+    /* Initialize FileProtocol */
+    s_protocol = new (std::nothrow) FileProtocol();
+    if (!s_protocol) {
+        ESP_LOGE(TAG, "FileProtocol allocation failed");
+        delete s_storage_manager;
+        s_storage_manager = nullptr;
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t ret = s_protocol->init(s_storage_manager);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "FileProtocol::init failed: %s", esp_err_to_name(ret));
+        delete s_protocol;
+        s_protocol = nullptr;
+        delete s_storage_manager;
+        s_storage_manager = nullptr;
+        return ret;
+    }
+
+    s_protocol->set_tx_callback(bridge_tx_cb);
+    s_runtime_ready = true;
+    ESP_LOGI(TAG, "Storage manager initialized (without SD mount)");
+    return ESP_OK;
+}
+
 #ifdef __cplusplus
 StorageManager* esp_idf_uart_filebridge_get_storage_manager(void) {
     if (!s_runtime_ready) {

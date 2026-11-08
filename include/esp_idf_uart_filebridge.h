@@ -156,6 +156,21 @@ esp_err_t esp_idf_uart_filebridge_resume(void);
  */
 esp_err_t esp_idf_uart_filebridge_mount_sd(void);
 
+/**
+ * @brief Initialize storage manager without mounting SD card.
+ * 
+ * Use this when you don't have an SD card but want to register other storage backends
+ * like SPIFFS, LittleFS, or Flash/FAT. This initializes only the StorageManager and
+ * FileProtocol components without attempting to mount SD.
+ * 
+ * @note This is automatically called by esp_idf_uart_filebridge_mount_sd() if needed.
+ * @note Only needed if you want to use get_storage_manager() without SD card.
+ * 
+ * @return ESP_OK on success, ESP_ERR_INVALID_STATE if bridge is not initialized,
+ *         ESP_ERR_NO_MEM if allocation fails
+ */
+esp_err_t esp_idf_uart_filebridge_init_storage_manager(void);
+
 #ifdef __cplusplus
 }
 
