@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "esp-idf-uart-filebridge"
+version = "2.0.0"
+description = "Host-side Python tools for esp-idf-uart-filebridge IDF component"
+requires-python = ">=3.10"
+license = {text = "The Unlicense"}
+authors = [
+    {name = "ESP UART FileBridge Contributors"}
+]
+keywords = ["esp32", "uart", "file-transfer", "embedded", "idf-component", "webdav"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Embedded Systems",
+]
+
+dependencies = [
+    "pyserial>=3.5"
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0"
+]
+batch = [
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "rich>=13.0"
+]
+webdav = [
+    "wsgidav>=4.0.0",
+    "cheroot>=10.0.0",
+    "pystray>=0.19.0; platform_system=='Windows'",
+    "pillow>=10.0.0"
+]
+
+[project.scripts]
+esp-idf-uart-filebridge = "esp_idf_uart_filebridge.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Strg-Alt-Entf-0x00/esp-idf-uart-filebridge"
+Repository = "https://github.com/Strg-Alt-Entf-0x00/esp-idf-uart-filebridge"
+Issues = "https://github.com/Strg-Alt-Entf-0x00/esp-idf-uart-filebridge/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]

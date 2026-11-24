@@ -1,0 +1,257 @@
+# This Kconfig file provides configuration options when the repository 
+# is used as a managed component. The content is identical to the 
+# component's own Kconfig file.
+
+menu "ESP UART File Bridge"
+
+    config UART_FILEBRIDGE_DEVICE_NAME
+        string "Device name (shown in CLI)"
+        default "AUTO"
+        help
+            Device identifier shown in CLI tool (e.g., "Connected to ESP32-P4-FILEBRIDGE").
+            Options:
+              "AUTO" - Auto-detect chip type (ESP32-FILEBRIDGE, ESP32-S3-FILEBRIDGE, ESP32-P4-FILEBRIDGE, etc.)
+              Custom string - Use your own device name (max 31 chars)
+            
+            Auto-detection uses IDF_TARGET (e.g., "esp32p4" → "ESP32-P4-FILEBRIDGE").
+
+    choice UART_FILEBRIDGE_TRANSPORT
+        prompt "Transport Interface"
+        default UART_FILEBRIDGE_TRANSPORT_UART
+        help
+            Select transport interface for Filebridge communication.
+            - Hardware UART: Uses physical UART (UART0, UART1, UART2) on GPIO pins.
+            - Native USB-Serial/JTAG: Uses the internal USB-Serial/JTAG port directly.
+              Allows single-cable operation on ESP32-C3, ESP32-C6, ESP32-S3, ESP32-H2, etc.
+
+        config UART_FILEBRIDGE_TRANSPORT_UART
+            bool "Hardware UART"
+
+        config UART_FILEBRIDGE_TRANSPORT_USB_SERIAL_JTAG
+            bool "Native USB-Serial/JTAG (Single USB-C Cable)"
+            depends on SOC_USB_SERIAL_JTAG_SUPPORTED
+    endchoice
+
+    config UART_FILEBRIDGE_NUM
+        int "UART port number"
+        default 1
+        range 0 2
+        depends on UART_FILEBRIDGE_TRANSPORT_UART
+        help
+            UART peripheral number to use for file bridge.
+            UART0 is usually the console - use UART1 or UART2.
+
+    config UART_FILEBRIDGE_TX_PIN
+        int "UART TX GPIO pin"
+        default 30
+        help
+            GPIO pin for UART TX. Default 30 matches Waveshare ESP32-P4-WIFI6
+            board with FT232R adapter.
+
+    config UART_FILEBRIDGE_RX_PIN
+        int "UART RX GPIO pin"
+        default 31
+        help
+            GPIO pin for UART RX.
+
+    config UART_FILEBRIDGE_RTS_PIN
+        int "UART RTS GPIO pin (Hardware Flow Control)"
+        default 50
+        help
+            GPIO pin for UART RTS. Required for Hardware Flow Control.
+            Set to -1 to disable HW flow control (not recommended at 3 Mbit/s).
+
+    config UART_FILEBRIDGE_CTS_PIN
+        int "UART CTS GPIO pin (Hardware Flow Control)"
+        default 29
+        help
+            GPIO pin for UART CTS. Required for Hardware Flow Control.
+            Set to -1 to disable HW flow control (not recommended at 3 Mbit/s).
+
+    config UART_FILEBRIDGE_BAUD
+        int "Baud rate"
+        default 3000000
+        help
+            UART baud rate. 3000000 (3 Mbit/s) is the FT232R maximum and
+            optimal for SD card throughput (~285 KB/s effective).
+            Reduce if experiencing connection issues.
+
+    config UART_FILEBRIDGE_RX_BUF_SIZE
+        int "UART RX buffer size (bytes)"
+        default 8192
+        help
+            Size of UART hardware RX ring buffer. Must be >= chunk size (8192).
+            Increase if experiencing RX overflows.
+
+    config UART_FILEBRIDGE_TX_BUF_SIZE
+        int "UART TX buffer size (bytes)"
+        default 8192
+        help
+            Size of UART hardware TX ring buffer.
+
+    config UART_FILEBRIDGE_MAX_PAYLOAD
+        int "Maximum protocol frame payload size (bytes)"
+        default 32768
+        help
+            Maximum payload size for UART filebridge protocol frames.
+            Default is 32768 (32 KB). For memory-constrained chips like the
+            ESP32 Classic without PSRAM, reducing this to 8192 (8 KB) saves
+            ~48 KB of heap RAM (as RX and TX buffers each allocate this size).
+
+    config UART_FILEBRIDGE_TASK_STACK
+        int "RX task stack size (bytes)"
+        default 16384
+        help
+            Stack size for the UART RX processing task.
+
+    config UART_FILEBRIDGE_TASK_PRIO
+        int "RX task priority"
+        default 5
+        range 1 24
+        help
+            FreeRTOS priority for the UART RX task. Keep below audio/real-time
+            tasks (typically priority >= 10).
+
+    config UART_FILEBRIDGE_SD_MOUNT_POINT
+        string "SD card VFS mount point"
+        default "/sd"
+        help
+            VFS path where the SD card is (or will be) mounted.
+
+    config UART_FILEBRIDGE_SD_MOUNT_OWN
+        bool "Mount SD card internally (component manages SD lifecycle)"
+        default y
+        help
+            If enabled, esp_idf_uart_filebridge_init() will mount the SD card.
+            Disable if your application already mounts the SD card elsewhere
+            and passes the mount point for shared access.
+
+    config UART_FILEBRIDGE_SD_MAX_FILES
+        int "Maximum simultaneously open SD files"
+        default 5
+        help
+            Passed to esp_vfs_fat_sdmmc_mount(). Each open file costs ~4 KB.
+
+    menu "ESP32-P4 SD LDO Power Control"
+        depends on IDF_TARGET_ESP32P4
+
+        config UART_FILEBRIDGE_P4_LDO_ENABLE
+            bool "Enable on-chip LDO for SD card power (ESP32-P4)"
+            default y
+            help
+                ESP32-P4 requires an on-chip LDO to power the SD card slot.
+                Disable only if using an external SD power circuit.
+
+        config UART_FILEBRIDGE_P4_LDO_CHAN
+            int "LDO channel ID for SD power"
+            default 4
+            depends on UART_FILEBRIDGE_P4_LDO_ENABLE
+            help
+                LDO channel connected to the SD card VDD pin.
+                Channel 4 is correct for the Waveshare ESP32-P4-WIFI6 board.
+
+    endmenu
+
+    menu "Storage Backend Configuration"
+
+        menu "SPIFFS Backend"
+            config UART_FILEBRIDGE_BACKEND_SPIFFS
+                bool "Enable SPIFFS backend"
+                default y
+                help
+                    Enable SPIFFS (SPI Flash File System) backend for internal flash storage.
+                    SPIFFS uses a flat namespace (no directory support) and is suitable for
+                    simple configuration storage. Requires a SPIFFS partition in partition table.
+
+            config UART_FILEBRIDGE_SPIFFS_MOUNT_POINT
+                string "SPIFFS VFS mount point"
+                default "/spiffs"
+                depends on UART_FILEBRIDGE_BACKEND_SPIFFS
+                help
+                    VFS path where the SPIFFS filesystem is mounted.
+
+            config UART_FILEBRIDGE_SPIFFS_PARTITION
+                string "SPIFFS partition label"
+                default "spiffs"
+                depends on UART_FILEBRIDGE_BACKEND_SPIFFS
+                help
+                    Partition label for SPIFFS in partition table.
+                    Must have type=data, subtype=spiffs.
+
+            config UART_FILEBRIDGE_SPIFFS_MAX_FILES
+                int "Maximum simultaneously open SPIFFS files"
+                default 5
+                range 1 10
+                depends on UART_FILEBRIDGE_BACKEND_SPIFFS
+                help
+                    Maximum number of files that can be open simultaneously on SPIFFS.
+                    Each open file uses RAM. Typical values: 3-5 for embedded systems.
+        endmenu
+
+        menu "Flash FAT Backend (Wear Leveling)"
+            config UART_FILEBRIDGE_BACKEND_FLASH_FAT
+                bool "Enable Flash FAT backend"
+                default y
+                help
+                    Enable FAT filesystem on internal flash with wear leveling.
+                    Supports standard hierarchical directories.
+
+            config UART_FILEBRIDGE_FLASH_FAT_MOUNT_POINT
+                string "Flash FAT VFS mount point"
+                default "/flash"
+                depends on UART_FILEBRIDGE_BACKEND_FLASH_FAT
+                help
+                    VFS path where the Flash FAT filesystem is mounted.
+
+            config UART_FILEBRIDGE_FLASH_FAT_PARTITION
+                string "Flash FAT partition label"
+                default "flash"
+                depends on UART_FILEBRIDGE_BACKEND_FLASH_FAT
+                help
+                    Partition label for Flash FAT in partition table.
+                    Must have type=data, subtype=fat.
+
+            config UART_FILEBRIDGE_FLASH_FAT_MAX_FILES
+                int "Maximum simultaneously open Flash FAT files"
+                default 5
+                range 1 10
+                depends on UART_FILEBRIDGE_BACKEND_FLASH_FAT
+                help
+                    Maximum number of files that can be open simultaneously on Flash FAT.
+        endmenu
+
+        menu "LittleFS Backend"
+            config UART_FILEBRIDGE_BACKEND_LITTLEFS
+                bool "Enable LittleFS backend"
+                default y
+                help
+                    Enable LittleFS backend for internal flash storage.
+                    Power-resilient, dynamic wear-leveling filesystem designed for embedded microcontrollers.
+
+            config UART_FILEBRIDGE_LITTLEFS_MOUNT_POINT
+                string "LittleFS VFS mount point"
+                default "/lfs"
+                depends on UART_FILEBRIDGE_BACKEND_LITTLEFS
+                help
+                    VFS path where the LittleFS filesystem is mounted.
+
+            config UART_FILEBRIDGE_LITTLEFS_PARTITION
+                string "LittleFS partition label"
+                default "littlefs"
+                depends on UART_FILEBRIDGE_BACKEND_LITTLEFS
+                help
+                    Partition label for LittleFS in partition table.
+                    Must have type=data, subtype=spiffs.
+
+            config UART_FILEBRIDGE_LITTLEFS_MAX_FILES
+                int "Maximum simultaneously open LittleFS files"
+                default 5
+                range 1 10
+                depends on UART_FILEBRIDGE_BACKEND_LITTLEFS
+                help
+                    Maximum number of files that can be open simultaneously on LittleFS.
+        endmenu
+
+    endmenu
+
+endmenu

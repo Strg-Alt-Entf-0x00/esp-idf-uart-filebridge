@@ -1,0 +1,415 @@
+#!/usr/bin/env python3
+"""
+esp-idf-uart-filebridge CLI - Command-line tool for esp-idf-uart-filebridge.
+
+Usage:
+    esp-idf-uart-filebridge ls /sd/ --port COM4
+    esp-idf-uart-filebridge upload local_file.bin /sd/data/local_file.bin --port COM4
+    esp-idf-uart-filebridge upload_dir ./local_directory /sd/data/ --port COM4
+    esp-idf-uart-filebridge download /sd/log.txt ./log.txt --port COM4
+    esp-idf-uart-filebridge delete /sd/old_file.bin --port COM4
+    esp-idf-uart-filebridge mkdir /sd/new_dir --port COM4
+    esp-idf-uart-filebridge format --port COM4
+    esp-idf-uart-filebridge info --port COM4
+"""
+
+import sys
+import os
+import argparse
+import logging
+from pathlib import Path
+from .protocol import ESP32Protocol, ESP32ProtocolError, StorageBackendInfo
+from .file_manager import ESP32FileManager
+
+log = logging.getLogger("esp_file_bridge.cli")
+
+
+def handle_batch_command(args):
+    """Handle batch command execution."""
+    try:
+        import json
+        import yaml
+        from pydantic import ValidationError
+        from rich.console import Console
+        
+        from .batch_config import BatchConfig
+        from .batch_runner import BatchRunner
+        
+        console = Console()
+        
+        # Load config file
+        config_path = Path(args.config)
+        if not config_path.exists():
+            console.print(f"[red]Config file not found: {config_path}[/red]")
+            return 1
+        
+        # Parse config based on extension
+        config_text = config_path.read_text(encoding='utf-8')
+        
+        if config_path.suffix in ('.yaml', '.yml'):
+            config_dict = yaml.safe_load(config_text)
+        elif config_path.suffix == '.json':
+            config_dict = json.loads(config_text)
+        else:
+            console.print(f"[red]Unsupported config format: {config_path.suffix}[/red]")
+            console.print("Supported formats: .json, .yaml, .yml")
+            return 1
+        
+        # Override variables from command line
+        if args.var:
+            if 'variables' not in config_dict:
+                config_dict['variables'] = {}
+            for var_assignment in args.var:
+                if '=' not in var_assignment:
+                    console.print(f"[red]Invalid variable format: {var_assignment}[/red]")
+                    console.print("Use: -V KEY=VALUE")
+                    return 1
+                key, value = var_assignment.split('=', 1)
+                config_dict['variables'][key.strip()] = value.strip()
+        
+        # Override options
+        if args.dry_run:
+            if 'options' not in config_dict:
+                config_dict['options'] = {}
+            config_dict['options']['dry_run'] = True
+        
+        # Validate config with Pydantic
+        try:
+            config = BatchConfig(**config_dict)
+        except ValidationError as e:
+            console.print("[red]Configuration validation failed:[/red]")
+            console.print(e)
+            return 1
+        
+        # Create runner
+        runner = BatchRunner(config, console=console)
+        
+        # Handle state management
+        if args.clear_state:
+            runner.state.clear()
+            console.print("[yellow]Cleared previous execution state[/yellow]")
+        
+        if not args.resume:
+            runner.state.clear()
+        
+        # Execute batch
+        success = runner.execute()
+        
+        return 0 if success else 1
+        
+    except ImportError as e:
+        log.error(f"Missing dependencies for batch command: {e}")
+        log.error("Install with: pip install 'esp-idf-uart-filebridge[batch]'")
+        return 1
+    except Exception as e:
+        log.exception(f"Batch execution failed: {e}")
+        return 1
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="esp-idf-uart-filebridge",
+        description="esp-idf-uart-filebridge host tool"
+    )
+    parser.add_argument("--port", "-p", help="Serial port (e.g. COM4 or /dev/ttyUSB0)")
+    parser.add_argument("--baud", "-b", type=int, default=3000000, help="Baud rate (default: 3000000)")
+    parser.add_argument("--flow-control", action="store_true", help="Enable hardware flow control (RTS/CTS)")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
+
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("info", help="Show device information")
+
+    stat_p = sub.add_parser("stat", help="Show file or directory metadata")
+    stat_p.add_argument("path", help="Remote file or directory path")
+
+    hash_p = sub.add_parser("hash", help="Show CRC32 hash of a remote file")
+    hash_p.add_argument("path", help="Remote file path")
+
+    ls_p = sub.add_parser("ls", help="List directory contents")
+    ls_p.add_argument("path", nargs="?", default="/sd/", help="Remote path (default: /sd/)")
+
+    ul_p = sub.add_parser("upload", help="Upload local file to ESP32")
+    ul_p.add_argument("local",  help="Local file path")
+    ul_p.add_argument("remote", help="Remote file path on ESP32 (e.g. /sd/data/file.bin)")
+    ul_p.add_argument("--verify", action="store_true", help="Verify CRC32 after upload")
+
+    uld_p = sub.add_parser("upload_dir", help="Upload entire local directory to ESP32")
+    uld_p.add_argument("local_dir", help="Local directory path")
+    uld_p.add_argument("remote_dir", help="Remote base directory on ESP32")
+
+    dl_p = sub.add_parser("download", help="Download file from ESP32")
+    dl_p.add_argument("remote", help="Remote file path")
+    dl_p.add_argument("local",  help="Local destination path")
+
+    rm_p = sub.add_parser("delete", help="Delete file or directory on ESP32")
+    rm_p.add_argument("path", help="Remote path to delete")
+
+    mk_p = sub.add_parser("mkdir", help="Create directory on ESP32")
+    mk_p.add_argument("path", help="Remote directory path to create")
+    
+    mv_p = sub.add_parser("rename", help="Rename or move file/directory on ESP32")
+    mv_p.add_argument("old_path", help="Current path")
+    mv_p.add_argument("new_path", help="New path")
+    
+    cp_p = sub.add_parser("copy", help="Copy file on ESP32")
+    cp_p.add_argument("src_path", help="Source file path")
+    cp_p.add_argument("dst_path", help="Destination file path")
+
+    fmt_p = sub.add_parser("format", help="Format the SD card (WARNING: Destroys all data)")
+    fmt_p.add_argument("--force", action="store_true", help="Do not prompt for confirmation")
+
+    webdav_p = sub.add_parser("webdav", help="Start WebDAV server (network drive)")
+    webdav_p.add_argument("--host", default="127.0.0.1", help="HTTP server host (default: 127.0.0.1)")
+    webdav_p.add_argument("--webdav-port", type=int, default=8080, help="HTTP server port (default: 8080)")
+    webdav_p.add_argument("--no-systray", action="store_true", help="Disable system tray icon (Windows)")
+    webdav_p.add_argument("--no-mount", action="store_true", help="Disable auto-mount (Windows)")
+    webdav_p.add_argument("--drive", help="Drive letter for Windows (e.g. Z:)")
+
+    storage_p = sub.add_parser("storage", aliases=["storage-list", "backends"], help="List registered storage backends (v2.0 multi-backend)")
+    storage_p.add_argument("mount", nargs="?", help="Optional mount point to query detailed info (e.g. /sd, /flash)")
+
+    # Interactive shell - SOLUTION FOR DTR RESET PROBLEM!
+    interactive_p = sub.add_parser("interactive", aliases=["shell", "i"], 
+                                    help="Interactive shell with persistent connection (avoids DTR reset)")
+    interactive_p.add_argument("--no-welcome", action="store_true", help="Skip welcome message")
+
+    batch_p = sub.add_parser("batch", help="Execute batch configuration file (JSON/YAML)")
+    batch_p.add_argument("config", help="Path to batch configuration file (*.json, *.yaml, *.yml)")
+    batch_p.add_argument("--dry-run", action="store_true", help="Simulate execution without making changes")
+    batch_p.add_argument("--resume", action="store_true", help="Resume from previous execution state")
+    batch_p.add_argument("--clear-state", action="store_true", help="Clear previous execution state before running")
+    batch_p.add_argument("--var", "-V", action="append", metavar="KEY=VALUE", help="Override config variables (e.g., -V PORT=COM13)")
+
+    # Allow global options (--port, --baud, --verbose) to be placed anywhere on the command line
+    raw_args = sys.argv[1:]
+    flags_with_val = {'--port', '-p', '--baud', '-b'}
+    bool_flags = {'--verbose', '-v', '--flow-control'}
+    global_args = []
+    cmd_args = []
+    i = 0
+    while i < len(raw_args):
+        arg = raw_args[i]
+        if arg in flags_with_val:
+            global_args.append(arg)
+            if i + 1 < len(raw_args):
+                global_args.append(raw_args[i + 1])
+                i += 1
+        elif any(arg.startswith(f + '=') for f in flags_with_val):
+            global_args.append(arg)
+        elif arg in bool_flags:
+            global_args.append(arg)
+        else:
+            cmd_args.append(arg)
+        i += 1
+
+    args = parser.parse_args(global_args + cmd_args)
+
+    # Special handling for batch command (doesn't require --port in args, reads from config)
+    if args.command == "batch":
+        return handle_batch_command(args)
+    
+    # Special handling for interactive shell (persistent connection)
+    if args.command in ("interactive", "shell", "i"):
+        if not args.port:
+            log.error("--port is required for interactive mode")
+            return 1
+        
+        from .interactive import InteractiveShell
+        
+        if not args.no_welcome:
+            print("=" * 60)
+            print("ESP32 UART Filebridge - Interactive Shell")
+            print("=" * 60)
+            print(f"Port: {args.port} @ {args.baud} baud")
+            print("Connection stays open - no DTR resets!")
+            print("=" * 60)
+            print()
+        
+        shell = InteractiveShell(args.port, args.baud)
+        return shell.run()
+
+
+    # All other commands require --port
+    if not args.port:
+        parser.error("the following arguments are required: --port/-p")
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(levelname)s %(message)s"
+    )
+
+    proto = None
+    try:
+        proto = ESP32Protocol()
+        manager = ESP32FileManager(proto)
+        if not proto.connect(args.port, args.baud, rtscts=args.flow_control):
+            raise ESP32ProtocolError(f"Could not connect to {args.port}")
+
+        if args.command == "info":
+            info = manager.get_device_info()
+            print(f"Device     : {info.device_name}")
+            print(f"FW Version : {info.fw_version}")
+            
+            # SD Card with better formatting  
+            if info.sd_present:
+                size_gb = info.sd_size / (1024**3)
+                free_gb = info.sd_free / (1024**3)
+                used_gb = size_gb - free_gb
+                percent_free = (free_gb / size_gb * 100) if size_gb > 0 else 0
+                
+                print(f"SD Card    : {size_gb:.1f} GB total")
+                print(f"  Free     : {free_gb:.1f} GB ({percent_free:.0f}%)")
+                print(f"  Used     : {used_gb:.1f} GB")
+            else:
+                print(f"SD Card    : Not detected")
+            
+            # Transfer settings
+            print(f"Chunk Size : {info.optimal_chunk_size // 1024} KB")
+
+        elif args.command in ("storage", "storage-list", "backends"):
+            if args.mount:
+                b = proto.get_storage_info(args.mount)
+                status = "Mounted" if b.mounted else "Unmounted"
+                print(f"Mount Point  : {b.mount_point}")
+                print(f"Type         : {b.type_name} (type={b.type})")
+                print(f"Status       : {status}")
+                print(f"Total Space  : {b.total_bytes / (1024*1024):.2f} MB ({b.total_bytes:,} bytes)")
+                print(f"Free Space   : {b.free_bytes / (1024*1024):.2f} MB ({b.free_bytes:,} bytes)")
+                print(f"Used Space   : {b.get_used_bytes() / (1024*1024):.2f} MB ({b.get_usage_percentage():.1f}%)")
+                caps = []
+                for cap_name in ["READ", "WRITE", "DIRECTORIES", "RECURSIVE_DELETE", "RENAME", "COPY", "HASH", "FORMAT", "TIMESTAMPS", "LARGE_FILES", "COMPRESSION", "WEAR_LEVELING"]:
+                    val = getattr(StorageBackendInfo, f"CAP_{cap_name}", None)
+                    if val and b.has_capability(val):
+                        caps.append(cap_name)
+                print(f"Capabilities : {' | '.join(caps)}")
+            else:
+                backends = proto.get_storage_list()
+                print(f"Registered Storage Backends ({len(backends)}):")
+                print(f"  {'Mount':<10} {'Type':<12} {'Status':<10} {'Total':<12} {'Free':<12} {'Used %':<8}")
+                print(f"  {'-'*10} {'-'*12} {'-'*10} {'-'*12} {'-'*12} {'-'*8}")
+                for b in backends:
+                    status = "Mounted" if b.mounted else "Unmounted"
+                    tot_str = f"{b.total_bytes / (1024*1024):.1f} MB" if b.total_bytes > 0 else "N/A"
+                    free_str = f"{b.free_bytes / (1024*1024):.1f} MB" if b.free_bytes > 0 else "N/A"
+                    used_pct = f"{b.get_usage_percentage():.1f}%" if b.total_bytes > 0 else "N/A"
+                    print(f"  {b.mount_point:<10} {b.type_name:<12} {status:<10} {tot_str:<12} {free_str:<12} {used_pct:<8}")
+
+        elif args.command == "ls":
+            entries = manager.list_directory(args.path)
+            for entry in sorted(entries, key=lambda item: (not item.is_directory, item.name)):
+                suffix = "/" if entry.is_directory else f"  ({entry.size:,} bytes)"
+                print(f"  {entry.name}{suffix}")
+
+        elif args.command == "stat":
+            info = manager.get_file_stat(args.path)
+            kind = "directory" if info.is_directory else "file"
+            print(f"Path       : {args.path}")
+            print(f"Type       : {kind}")
+            print(f"Size       : {info.size} bytes")
+            print(f"Timestamp  : {info.timestamp}")
+            print(f"Attributes : 0x{info.attributes:02X}")
+
+        elif args.command == "hash":
+            value = manager.get_file_hash(args.path)
+            print(f"CRC32      : {value:08X}")
+
+        elif args.command == "upload":
+            file_size = os.path.getsize(args.local)
+            print(f"Uploading {args.local} -> {args.remote} ({file_size:,} bytes)")
+            manager.upload_file(args.local, args.remote,
+                              progress_callback=lambda sent, total:
+                              print(f"\r  {sent*100//total:3d}% {sent:,}/{total:,} bytes", end="", flush=True))
+            print(f"\n[OK] Upload complete")
+            if args.verify:
+                print("Verifying CRC32...")
+                import binascii
+                with open(args.local, 'rb') as f:
+                    local_crc = binascii.crc32(f.read())
+                remote_crc = manager.get_file_hash(args.remote)
+                if local_crc == remote_crc:
+                    print(f"[OK] CRC32 Match: {local_crc:08X}")
+                else:
+                    print(f"[ERROR] CRC32 Mismatch! Local: {local_crc:08X}, Remote: {remote_crc:08X}")
+                    sys.exit(1)
+
+        elif args.command == "upload_dir":
+            print(f"Uploading directory {args.local_dir} -> {args.remote_dir}")
+            count = manager.upload_directory(args.local_dir, args.remote_dir)
+            print(f"[OK] Uploaded {count} files")
+
+        elif args.command == "download":
+            print(f"Downloading {args.remote} -> {args.local}")
+            manager.download_file(args.remote, args.local,
+                                progress_callback=lambda sent, total:
+                                print(f"\r  {sent*100//total:3d}% {sent:,}/{total:,} bytes", end="", flush=True))
+            print(f"\n[OK] Download complete")
+
+        elif args.command == "delete":
+            manager.delete_file(args.path)
+            print(f"[OK] Deleted: {args.path}")
+
+        elif args.command == "mkdir":
+            manager.create_directory(args.path)
+            print(f"[OK] Created: {args.path}")
+        
+        elif args.command == "rename":
+            proto.rename(args.old_path, args.new_path)
+            print(f"[OK] Renamed: {args.old_path} -> {args.new_path}")
+        
+        elif args.command == "copy":
+            proto.copy_file(args.src_path, args.dst_path)
+            print(f"[OK] Copied: {args.src_path} -> {args.dst_path}")
+
+        elif args.command == "format":
+            if not args.force:
+                confirm = input("WARNING: This will destroy all data on the ESP32 SD card. Continue? (y/N): ")
+                if confirm.lower() != 'y':
+                    print("Aborted.")
+                    sys.exit(0)
+            print("Formatting SD card...")
+            manager.format_fs()
+            print("[OK] Format complete")
+
+        elif args.command == "webdav":
+            # WebDAV server requires additional dependencies
+            try:
+                from .webdav import is_available, start_webdav_server
+                
+                if not is_available():
+                    log.error("WebDAV dependencies not installed!")
+                    log.error("Install with: pip install esp-idf-uart-filebridge[webdav]")
+                    sys.exit(1)
+                
+                # Close the protocol connection (WebDAV server will create its own)
+                proto.disconnect()
+                
+                # Start WebDAV server (blocking)
+                exit_code = start_webdav_server(
+                    port=args.port,
+                    baud=args.baud,
+                    host=args.host,
+                    webdav_port=args.webdav_port,
+                    systray=not args.no_systray,
+                    auto_mount=not args.no_mount,
+                    drive=args.drive
+                )
+                sys.exit(exit_code)
+            
+            except ImportError:
+                log.error("WebDAV module not found!")
+                log.error("Install with: pip install esp-idf-uart-filebridge[webdav]")
+                sys.exit(1)
+
+    except ESP32ProtocolError as e:
+        log.error(f"Protocol error: {e}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\nAborted.")
+        sys.exit(0)
+    finally:
+        if proto:
+            proto.disconnect()
+
+if __name__ == "__main__":
+    main()

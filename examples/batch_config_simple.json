@@ -1,0 +1,41 @@
+{
+  "version": "1.0",
+  "description": "Simple JSON batch configuration",
+  "device": {
+    "port": "COM13",
+    "baud": 3000000
+  },
+  "variables": {
+    "project_root": "./my_project",
+    "data_path": "data"
+  },
+  "options": {
+    "verbose": true,
+    "progress_bar": true,
+    "fail_fast": true
+  },
+  "tasks": [
+    {
+      "name": "Create data directory",
+      "type": "mkdir",
+      "path": "/sd/data",
+      "parents": true,
+      "ignore_exists": true
+    },
+    {
+      "name": "Upload data files",
+      "type": "upload_dir",
+      "source": "${project_root}/${data_path}/",
+      "destination": "/sd/data/",
+      "pattern": "*.bin",
+      "verify": true,
+      "overwrite": false,
+      "create_dirs": true
+    },
+    {
+      "name": "List uploaded files",
+      "type": "list",
+      "path": "/sd/data/"
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+# ============================================================================
+# ESP32-C6 Hardware Target Configuration
+# ============================================================================
+# Flash: 4MB (ESP32-C6FH4)
+# Single-cable USB-C: Native USB-Serial/JTAG for Filebridge (Zero extra cables)
+# Console: UART0 (GPIO16/17) to prevent logs from polluting USB protocol
+# RAM: 512 KB SRAM
+# Notes: Single core, RISC-V 32-bit, WiFi 6 + BLE + Zigbee
+
+# ============================================================================
+# Console Configuration (Keep USB-Serial/JTAG completely clean for Filebridge)
+# ============================================================================
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# ============================================================================
+# Flash Configuration (4 MB)
+# ============================================================================
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# ============================================================================
+# Partition Table
+# ============================================================================
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_4mb.csv"
+
+# ============================================================================
+# File Bridge Component Configuration (Native USB-Serial/JTAG Transport)
+# ============================================================================
+CONFIG_UART_FILEBRIDGE_TRANSPORT_USB_SERIAL_JTAG=y
+CONFIG_UART_FILEBRIDGE_RX_BUF_SIZE=16384
+CONFIG_UART_FILEBRIDGE_TX_BUF_SIZE=16384
+
+# ============================================================================
+# SD Card Configuration
+# ============================================================================
+CONFIG_UART_FILEBRIDGE_SD_MOUNT_POINT="/sd"
+CONFIG_UART_FILEBRIDGE_SD_MOUNT_OWN=y
+CONFIG_UART_FILEBRIDGE_SD_MAX_FILES=5
+
+# ============================================================================
+# Performance (Single core, more RAM)
+# ============================================================================
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_FREERTOS_UNICORE=y

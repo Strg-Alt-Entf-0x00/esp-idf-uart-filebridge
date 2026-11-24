@@ -1,0 +1,19 @@
+# Partition Table for 32MB Flash (ESP32-P4)
+# Total Flash: 32MB (33,554,432 bytes / 0x2000000)
+#
+# Layout:
+#   nvs:       16 KB (0x9000 - 0xD000)
+#   phy_init:   4 KB (0xD000 - 0xE000)
+#   factory:    3 MB (0x10000 - 0x310000) - Application firmware
+#   flash:      8 MB - Flash FAT partition with wear leveling
+#   littlefs:   8 MB - LittleFS partition
+#   spiffs:     8 MB - SPIFFS partition
+#   Reserved:  ~5 MB - Future use (models, data, OTA, etc.)
+#
+# Name,       Type, SubType,  Offset,   Size,  Flags
+nvs,          data, nvs,      0x9000,   16K,
+phy_init,     data, phy,      0xD000,    4K,
+factory,      app,  factory,  0x10000,   3M,
+flash,        data, fat,           ,     8M,
+littlefs,     data, spiffs,        ,     8M,
+spiffs,       data, spiffs,        ,     8M,

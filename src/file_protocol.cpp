@@ -1,0 +1,1434 @@
+/*
+ * ESP-IDF UART FileBridge - File Protocol Implementation
+ */
+
+#include "file_protocol.h"
+#include "storage_manager.h"
+#include "storage_backend.h"
+#include "protocol_logger.h"  // Industrial-grade thread-safe logging
+#include "esp_log.h"
+#include "esp_system.h"
+#include "esp_chip_info.h"
+#include "esp_flash.h"
+#include "esp_psram.h"
+#include "esp_task_wdt.h"
+#include "driver/uart.h"
+#include <cstring>
+#include <cstdio>
+#include <cerrno>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
+
+static const char* TAG = "file_protocol";
+static constexpr char UPLOAD_TEMP_SUFFIX[] = ".upload";
+
+// Tags to suppress during file transfers for optimal performance
+// IMPORTANT: DO NOT suppress file_protocol itself - only I/O subsystems
+static const char* SUPPRESS_TAGS[] = {
+    "sdmmc_req",
+    "sdmmc_cmd",
+    "sdmmc_io",
+    "vfs_fat",
+    "littlefs",
+    "vfs",
+    nullptr  // Sentinel
+};
+
+static esp_log_level_t saved_log_levels[10];  // Store original levels
+
+void FileProtocol::suppress_logs_if_needed() {
+    if (!m_log_suppression_enabled) return;
+    
+    // Save current log levels and suppress
+    for (int i = 0; SUPPRESS_TAGS[i] != nullptr; i++) {
+        saved_log_levels[i] = esp_log_level_get(SUPPRESS_TAGS[i]);
+        esp_log_level_set(SUPPRESS_TAGS[i], ESP_LOG_NONE);
+    }
+}
+
+void FileProtocol::restore_logs_if_needed() {
+    if (!m_log_suppression_enabled) return;
+    
+    // Restore original log levels
+    for (int i = 0; SUPPRESS_TAGS[i] != nullptr; i++) {
+        esp_log_level_set(SUPPRESS_TAGS[i], saved_log_levels[i]);
+    }
+}
+
+FileProtocol::FileProtocol() {
+}
+
+FileProtocol::~FileProtocol() {
+    abort_active_transfer();
+}
+
+esp_err_t FileProtocol::init(StorageManager* storage_manager, uart_port_t uart_num, 
+                             uart_filebridge_transport_t transport) {
+    if (m_initialized) {
+        return ESP_OK;
+    }
+    
+    if (!storage_manager) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    m_storage_manager = storage_manager;
+    m_uart_num = uart_num;
+    m_transport = transport;
+    m_initialized = true;
+    
+    ESP_LOGI(TAG, "FileProtocol initialized (UART%d, transport=%d)", (int)uart_num, (int)transport);
+    return ESP_OK;
+}
+
+void FileProtocol::set_tx_callback(esp_err_t (*callback)(const uint8_t*, size_t)) {
+    m_tx_callback = callback;
+}
+
+esp_err_t FileProtocol::send_frame(CommandId cmd, const void* payload, 
+                                   uint16_t length, uint8_t flags) {
+    if (!m_tx_callback) {
+        ESP_LOGE(TAG, "No TX callback set!");
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    if (length > PROTO_MAX_PAYLOAD) {
+        ESP_LOGE(TAG, "Payload too large: %u", length);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    
+    // Build protocol frame in static buffer
+    ProtocolHeader* header = reinterpret_cast<ProtocolHeader*>(m_tx_buffer);
+    header->magic[0] = PROTO_MAGIC_0;
+    header->magic[1] = PROTO_MAGIC_1;
+    header->version = (PROTO_VERSION_MAJOR << 4) | PROTO_VERSION_MINOR;
+    header->cmd = static_cast<uint8_t>(cmd);
+    header->flags = flags;
+    header->sequence = m_tx_sequence++;
+    header->length = length;
+    
+    // Copy payload
+    if (payload && length > 0) {
+        memcpy(m_tx_buffer + PROTO_HEADER_SIZE, payload, length);
+    }
+    
+    // Calculate and append CRC32
+    size_t protocol_frame_len = PROTO_HEADER_SIZE + length + PROTO_CRC_SIZE;
+    add_frame_crc(m_tx_buffer, protocol_frame_len);
+    
+    ESP_LOGD(TAG, "TX frame: cmd=0x%02X, len=%d, total=%d", cmd, length, (int)protocol_frame_len);
+    
+    // Wrap protocol frame in multiplexer frame (TYPE=0x02)
+    static uint8_t mux_frame[MUX_MAX_FRAME_SIZE];
+    size_t mux_len = 0;
+    
+    esp_err_t ret = mux_encode_frame(MUX_TYPE_PROTOCOL, m_tx_buffer, protocol_frame_len,
+                                     mux_frame, &mux_len);
+    
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to encode multiplexed frame: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    
+    // Send multiplexed frame via TX callback
+    ret = m_tx_callback(mux_frame, mux_len);
+    return ret;
+}
+
+esp_err_t FileProtocol::send_error(ErrorCode error) {
+    uint8_t payload = static_cast<uint8_t>(error);
+    return send_frame(CMD_NACK, &payload, sizeof(payload));
+}
+
+esp_err_t FileProtocol::send_error_ex(ErrorCode error, const char* reason, uint64_t context_value) {
+    NackExtended nack = {};
+    nack.error_code = static_cast<uint8_t>(error);
+    
+    if (reason) {
+        strncpy(nack.reason, reason, sizeof(nack.reason) - 1);
+        nack.reason[sizeof(nack.reason) - 1] = '\0';  // Ensure null termination
+    } else {
+        nack.reason[0] = '\0';
+    }
+    
+    nack.context_value = context_value;
+    nack.heap_free = esp_get_free_heap_size();
+    nack.reserved = 0;
+    
+    // Log error for debugging
+    ESP_LOGE(TAG, "NACK: code=%d, reason='%s', context=%llu, heap=%u", 
+             error, nack.reason, nack.context_value, nack.heap_free);
+    
+    return send_frame(CMD_NACK, &nack, sizeof(nack));
+}
+
+esp_err_t FileProtocol::send_ack() {
+    return send_frame(CMD_ACK, nullptr, 0);
+}
+
+esp_err_t FileProtocol::send_progress(uint64_t bytes_transferred, uint64_t total_bytes) {
+    TransferProgress progress;
+    progress.bytes_transferred = bytes_transferred;
+    progress.total_bytes = total_bytes;
+    
+    if (total_bytes > 0) {
+        progress.percent = (bytes_transferred * 10000) / total_bytes;
+    } else {
+        progress.percent = 0;
+    }
+    
+    return send_frame(CMD_PROGRESS, &progress, sizeof(progress));
+}
+
+void FileProtocol::process_rx_data(const uint8_t* data, size_t length) {
+    if (!data || length == 0) {
+        return;
+    }
+    
+    // Append to RX buffer
+    for (size_t i = 0; i < length; i++) {
+        if (m_rx_idx >= sizeof(m_rx_buffer)) {
+            ESP_LOGW(TAG, "RX buffer overflow, resetting");
+            reset_rx_buffer();
+        }
+        
+        m_rx_buffer[m_rx_idx++] = data[i];
+        
+        // Try to parse frame when we have at least header + CRC
+        if (m_rx_idx >= PROTO_HEADER_SIZE + PROTO_CRC_SIZE) {
+            try_parse_frame();
+        }
+    }
+}
+
+void FileProtocol::try_parse_frame() {
+    // Sync to magic bytes using linear scan to prevent CPU stall
+    if (m_rx_idx >= 2) {
+        size_t sync_idx = 0;
+        bool found = false;
+        for (size_t i = 0; i < m_rx_idx - 1; i++) {
+            if (m_rx_buffer[i] == PROTO_MAGIC_0 && m_rx_buffer[i+1] == PROTO_MAGIC_1) {
+                sync_idx = i;
+                found = true;
+                break;
+            }
+        }
+        
+        if (!found) {
+            // Keep the last byte if it's PROTO_MAGIC_0 (might be the start of a valid frame)
+            if (m_rx_idx > 0 && m_rx_buffer[m_rx_idx - 1] == PROTO_MAGIC_0) {
+                m_rx_buffer[0] = PROTO_MAGIC_0;
+                m_rx_idx = 1;
+            } else {
+                m_rx_idx = 0;
+            }
+            return;
+        } else if (sync_idx > 0) {
+            // Discard invalid bytes by moving the valid data to the front ONCE
+            memmove(m_rx_buffer, m_rx_buffer + sync_idx, m_rx_idx - sync_idx);
+            m_rx_idx -= sync_idx;
+        }
+    }
+    
+    // Check if we still have at least a header
+    if (m_rx_idx < PROTO_HEADER_SIZE + PROTO_CRC_SIZE) {
+        return;
+    }
+    
+    // Parse header
+    const ProtocolHeader* header = reinterpret_cast<const ProtocolHeader*>(m_rx_buffer);
+
+    if (header->version != ((PROTO_VERSION_MAJOR << 4) | PROTO_VERSION_MINOR)) {
+        reset_rx_buffer();
+        send_error(ERR_INVALID_VERSION);
+        return;
+    }
+
+    if (header->length > PROTO_MAX_PAYLOAD) {
+        reset_rx_buffer();
+        send_error(ERR_PAYLOAD_TOO_LARGE);
+        return;
+    }
+    
+    // Check if we have complete frame
+    size_t frame_len = PROTO_HEADER_SIZE + header->length + PROTO_CRC_SIZE;
+    
+    if (m_rx_idx < frame_len) {
+        // Wait for more data
+        return;
+    }
+    
+    // Verify CRC
+    if (!verify_frame_crc(m_rx_buffer, frame_len)) {
+        ESP_LOGE(TAG, "CRC mismatch for cmd=0x%02X", header->cmd);
+        reset_rx_buffer();
+        send_error(ERR_INVALID_CRC);
+        return;
+    }
+
+    // Validate sequence ordering after the first received frame seeds the expected value.
+    if (header->cmd == CMD_HELLO) {
+        // HELLO starts a new host session; accept its sequence and restart RX/TX numbering.
+        m_rx_sequence = header->sequence;
+        m_rx_sequence_valid = true;
+        m_tx_sequence = 0;
+    } else if (!m_rx_sequence_valid) {
+        m_rx_sequence = header->sequence;
+        m_rx_sequence_valid = true;
+    } else if (header->sequence != m_rx_sequence) {
+        ESP_LOGW(TAG, "Sequence mismatch: expected=%u actual=%u cmd=0x%02X",
+                 m_rx_sequence, header->sequence, header->cmd);
+        m_rx_sequence_valid = false;
+        reset_rx_buffer();
+        send_error(ERR_SEQUENCE_ERROR);
+        return;
+    }
+    m_rx_sequence = (m_rx_sequence + 1) & 0xFFFF;
+    
+    // Extract payload
+    const uint8_t* payload = (header->length > 0) ? (m_rx_buffer + PROTO_HEADER_SIZE) : nullptr;
+    
+    // Dispatch command
+    dispatch_command(header, payload);
+    
+    // Remove processed frame from buffer
+    if (m_rx_idx > frame_len) {
+        memmove(m_rx_buffer, m_rx_buffer + frame_len, m_rx_idx - frame_len);
+        m_rx_idx -= frame_len;
+    } else {
+        m_rx_idx = 0;
+    }
+}
+
+void FileProtocol::dispatch_command(const ProtocolHeader* header, const uint8_t* payload) {
+    switch (static_cast<CommandId>(header->cmd)) {
+        case CMD_HELLO:
+            ESP_LOGI(TAG, "Command: HELLO");
+            handle_hello();
+            break;
+            
+        case CMD_DEVICE_INFO:
+            handle_device_info();
+            break;
+            
+        case CMD_REBOOT:
+            handle_reboot();
+            break;
+            
+        case CMD_SET_BAUDRATE:
+            handle_set_baudrate(payload, header->length);
+            break;
+            
+        case CMD_LIST_BEGIN:
+            handle_list_begin(payload, header->length);
+            break;
+            
+        case CMD_STAT:
+            handle_stat(payload, header->length);
+            break;
+            
+        case CMD_SPACE_INFO:
+            handle_space_info(payload, header->length);
+            break;
+            
+        case CMD_GET_FILE_BEGIN:
+            handle_get_file_begin(payload, header->length);
+            break;
+            
+        case CMD_PUT_FILE_BEGIN:
+            handle_put_file_begin(payload, header->length);
+            break;
+            
+        case CMD_PUT_FILE_DATA:
+            handle_put_file_data(payload, header->length);
+            break;
+            
+        case CMD_PUT_FILE_END:
+            handle_put_file_end();
+            break;
+            
+        case CMD_PUT_FILE_ABORT:
+            handle_put_file_abort();
+            break;
+            
+        case CMD_DELETE:
+            handle_delete(payload, header->length);
+            break;
+            
+        case CMD_RENAME:
+            handle_rename(payload, header->length);
+            break;
+            
+        case CMD_MKDIR:
+            handle_mkdir(payload, header->length);
+            break;
+            
+        case CMD_COPY:
+            handle_copy(payload, header->length);
+            break;
+            
+        case CMD_HASH_FILE:
+            handle_hash_file(payload, header->length);
+            break;
+            
+        case CMD_FORMAT_FS:
+            handle_format_fs(payload, header->length);
+            break;
+            
+        case CMD_STORAGE_LIST:
+            handle_storage_list();
+            break;
+            
+        case CMD_STORAGE_INFO:
+            handle_storage_info(payload, header->length);
+            break;
+            
+        default:
+            ESP_LOGW(TAG, "Unknown command: 0x%02X", header->cmd);
+            send_error(ERR_UNKNOWN_CMD);
+            break;
+    }
+}
+
+void FileProtocol::reset_rx_buffer() {
+    m_rx_idx = 0;
+    m_rx_sequence_valid = false;
+}
+
+void FileProtocol::abort_active_transfer() {
+    if (m_transfer_file) {
+        fclose(m_transfer_file);
+        m_transfer_file = nullptr;
+    }
+
+    if (!m_benchmark_mode && m_transfer_temp_path[0] != '\0') {
+        if (unlink(m_transfer_temp_path) != 0 && errno != ENOENT) {
+            ESP_LOGW(TAG, "Failed to remove partial upload %s: errno=%d",
+                     m_transfer_temp_path, errno);
+        }
+    }
+    
+    if (m_sd_write_buffer) {
+        free(m_sd_write_buffer);
+        m_sd_write_buffer = nullptr;
+    }
+    
+    // Restore logs if we were in a transfer
+    if (m_transfer_active) {
+        restore_logs_if_needed();
+    }
+    
+    m_transfer_active = false;
+    m_transfer_bytes = 0;
+    m_transfer_total = 0;
+    m_transfer_failed = false;
+    m_transfer_path[0] = '\0';
+    m_transfer_temp_path[0] = '\0';
+    m_benchmark_mode = false;
+}
+
+// ============================================================================
+// Command Handlers - Basic Commands
+// ============================================================================
+
+void FileProtocol::handle_hello() {
+    // Industrial-Grade: Clean abort of dangling transfers on new connection
+    // Only log warning if there was ACTUALLY an active transfer
+    if (m_transfer_active) {
+        ESP_LOGW(TAG, "Aborting active transfer on HELLO (previous connection died)");
+        abort_active_transfer();
+    } else if (m_transfer_temp_path[0] != '\0') {
+        // Silent cleanup of leftover temp files from crashed connections
+        abort_active_transfer();
+    }
+
+    ESP_LOGD(TAG, "HELLO handshake");
+    esp_err_t ret = send_ack();
+    if (ret == ESP_OK) {
+        ESP_LOGD(TAG, "ACK sent successfully");
+    } else {
+        ESP_LOGE(TAG, "ACK send failed: %d", ret);
+    }
+    
+    // INDUSTRIAL-GRADE: Send BOOT_READY after first HELLO
+    // This tells Python we're ready for commands (deterministic sync point)
+    static bool first_hello = true;
+    if (first_hello) {
+        send_frame(CMD_BOOT_READY, nullptr, 0);
+        ESP_LOGI(TAG, "BOOT_READY sent after first HELLO");
+        first_hello = false;
+    }
+    
+    ESP_LOGD(TAG, "HELLO complete");
+}
+
+void FileProtocol::handle_device_info() {
+    ESP_LOGI(TAG, "DEVICE_INFO requested");
+    
+    // Industrial-Grade: If a new connection handshake comes in while a transfer is active,
+    // the previous connection crashed/died. Forcefully abort the dangling transfer.
+    if (m_transfer_active || m_transfer_temp_path[0] != '\0') {
+        ESP_LOGW(TAG, "Dangling transfer detected on handshake. Aborting...");
+        abort_active_transfer();
+    }
+    
+    DeviceInfo info = {};
+    
+    // Device name: Auto-detect chip type or use configured name
+    const char* cfg_name = CONFIG_UART_FILEBRIDGE_DEVICE_NAME;
+    if (strcmp(cfg_name, "AUTO") == 0) {
+        // Auto-detect from IDF_TARGET
+        #if CONFIG_IDF_TARGET_ESP32
+            strncpy(info.device_name, "ESP32-FILEBRIDGE", sizeof(info.device_name));
+        #elif CONFIG_IDF_TARGET_ESP32S2
+            strncpy(info.device_name, "ESP32-S2-FILEBRIDGE", sizeof(info.device_name));
+        #elif CONFIG_IDF_TARGET_ESP32S3
+            strncpy(info.device_name, "ESP32-S3-FILEBRIDGE", sizeof(info.device_name));
+        #elif CONFIG_IDF_TARGET_ESP32C3
+            strncpy(info.device_name, "ESP32-C3-FILEBRIDGE", sizeof(info.device_name));
+        #elif CONFIG_IDF_TARGET_ESP32C6
+            strncpy(info.device_name, "ESP32-C6-FILEBRIDGE", sizeof(info.device_name));
+        #elif CONFIG_IDF_TARGET_ESP32H2
+            strncpy(info.device_name, "ESP32-H2-FILEBRIDGE", sizeof(info.device_name));
+        #elif CONFIG_IDF_TARGET_ESP32P4
+            strncpy(info.device_name, "ESP32-P4-FILEBRIDGE", sizeof(info.device_name));
+        #else
+            strncpy(info.device_name, "ESP32-FILEBRIDGE", sizeof(info.device_name));
+        #endif
+    } else {
+        // Use custom configured name
+        strncpy(info.device_name, cfg_name, sizeof(info.device_name));
+    }
+    info.device_name[sizeof(info.device_name) - 1] = '\0';  // Ensure null-termination
+    
+    info.fw_version_major = 2;
+    info.fw_version_minor = 0;
+    info.fw_version_patch = 0;
+    info.hw_revision = 1;
+    
+    // Flash info - dynamically query actual chip flash size
+    uint32_t flash_size = 0;
+    if (esp_flash_get_size(NULL, &flash_size) == ESP_OK) {
+        info.flash_size = flash_size;
+    } else {
+        info.flash_size = 0;
+    }
+    
+    uint64_t flash_free = 0;
+    info.flash_free = flash_free;
+    // PSRAM info
+    #if CONFIG_SPIRAM
+    info.psram_size = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+    info.psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    #else
+    info.psram_size = 0;
+    info.psram_free = 0;
+    #endif
+    
+    // SD card info (check if SD backend is registered and mounted)
+    StorageBackend* sd_backend = m_storage_manager->get_backend_by_mount("/sd");
+    info.sd_present = (sd_backend && sd_backend->is_mounted()) ? 1 : 0;
+    
+    if (info.sd_present) {
+        uint64_t sd_total = 0, sd_free = 0;
+        if (m_storage_manager->get_space_info("/sd", &sd_total, &sd_free) == ESP_OK) {
+            info.sd_size = sd_total;
+            info.sd_free = sd_free;
+            
+            // Determine SD type based on capacity
+            if (info.sd_size > 32ULL * 1024 * 1024 * 1024) {
+                info.sd_type = 4;  // SDXC
+                strncpy(info.sd_fs_type, "exFAT", sizeof(info.sd_fs_type));
+            } else if (info.sd_size > 2ULL * 1024 * 1024 * 1024) {
+                info.sd_type = 3;  // SDHC
+                strncpy(info.sd_fs_type, "FAT32", sizeof(info.sd_fs_type));
+            } else {
+                info.sd_type = 2;  // SDSC
+                strncpy(info.sd_fs_type, "FAT32", sizeof(info.sd_fs_type));
+            }
+        }
+    } else {
+        strncpy(info.sd_fs_type, "NONE", sizeof(info.sd_fs_type));
+    }
+    
+    // Dynamic Capabilities (Negotiation)
+    info.max_payload_size = PROTO_MAX_PAYLOAD;
+    // Optimized chunk size for maximum SD card performance:
+    // - 8192 bytes = 16x SD sector size (optimal for sequential writes)
+    // - Matches 8KB UART buffer size perfectly
+    // - Achieves 97% UART efficiency (285 KB/s download @ 3 Mbaud)
+    info.optimal_chunk_size = 8192; 
+    
+    send_frame(CMD_DEVICE_INFO, &info, sizeof(info));
+}
+
+void FileProtocol::handle_reboot() {
+    ESP_LOGW(TAG, "REBOOT requested");
+    send_ack();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    esp_restart();
+}
+
+void FileProtocol::handle_set_baudrate(const uint8_t* payload, uint16_t length) {
+    if (length != sizeof(uint32_t)) {
+        ESP_LOGE(TAG, "SET_BAUDRATE: Invalid payload length %d", length);
+        send_error(ERR_INVALID_PARAM);
+        return;
+    }
+    
+    // Only UART transport supports baud rate switching
+    if (m_transport != UART_FILEBRIDGE_TRANSPORT_UART) {
+        ESP_LOGE(TAG, "SET_BAUDRATE: Not supported on non-UART transport");
+        send_error(ERR_NOT_SUPPORTED);
+        return;
+    }
+    
+    uint32_t new_baudrate = 0;
+    memcpy(&new_baudrate, payload, sizeof(uint32_t));
+    
+    // Validate baud rate (support common rates)
+    if (new_baudrate < 9600 || new_baudrate > 4000000) {
+        ESP_LOGE(TAG, "SET_BAUDRATE: Invalid baud rate %u", new_baudrate);
+        send_error(ERR_INVALID_PARAM);
+        return;
+    }
+    
+    ESP_LOGI(TAG, "SET_BAUDRATE: Switching to %u baud", new_baudrate);
+    
+    // Send ACK before switching
+    send_ack();
+    
+    // Flush all pending TX data
+    uart_wait_tx_done(m_uart_num, pdMS_TO_TICKS(1000));
+    vTaskDelay(pdMS_TO_TICKS(50));  // Give PC time to receive ACK
+    
+    // Change baud rate
+    esp_err_t ret = uart_set_baudrate(m_uart_num, new_baudrate);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set baud rate: %s", esp_err_to_name(ret));
+        // Can't send error - baud rate might be broken
+        return;
+    }
+    
+    ESP_LOGI(TAG, "Baud rate changed to %u", new_baudrate);
+}
+
+// Continued in next part...
+
+// ============================================================================
+// Command Handlers - Directory and File Operations
+// ============================================================================
+
+void FileProtocol::handle_list_begin(const uint8_t* payload, uint16_t length) {
+    if (!payload || length == 0) {
+        send_error(ERR_INVALID_PATH);
+        return;
+    }
+    
+    // Path is null-terminated string in payload
+    const char* path = reinterpret_cast<const char*>(payload);
+    
+    // INDUSTRIAL-GRADE SOLUTION: Use separate log task instead of direct ESP_LOG
+    // Protocol Logger runs in different task context → NO reentrancy with COBS multiplexer
+    // This is the professional approach used in production RTOS systems
+    PROTO_LOGI(TAG, "LIST_BEGIN: %s", path);
+    
+    // Send ACK first
+    send_ack();
+    
+    // List directory entries with periodic yielding for watchdog
+    // Industrial-Grade: Track entry count to yield CPU every N entries
+    struct CallbackContext {
+        FileProtocol* protocol;
+        uint32_t entry_count;
+    };
+    CallbackContext ctx = { this, 0 };
+    
+    auto callback = [](const char* name, uint64_t size, bool is_dir, 
+                      uint32_t timestamp, void* user_data) {
+        CallbackContext* ctx = static_cast<CallbackContext*>(user_data);
+        FileProtocol* self = ctx->protocol;
+        
+        FileEntry entry = {};
+        strncpy(entry.name, name, sizeof(entry.name) - 1);
+        entry.size = size;
+        entry.timestamp = timestamp;
+        entry.is_directory = is_dir ? 1 : 0;
+        
+        self->send_frame(CMD_LIST_ENTRY, &entry, sizeof(entry));
+        
+        // Yield CPU every 20 entries to prevent watchdog timeout on large directories
+        if ((++ctx->entry_count % 20) == 0) {
+            taskYIELD();
+        }
+    };
+    
+    esp_err_t ret = m_storage_manager->list_directory(path, callback, &ctx);
+    
+    if (ret != ESP_OK) {
+        send_error(ERR_FILE_NOT_FOUND);
+        return;
+    }
+    
+    // Send end marker
+    send_frame(CMD_LIST_END, nullptr, 0);
+}
+
+void FileProtocol::handle_stat(const uint8_t* payload, uint16_t length) {
+    if (!payload || length == 0) {
+        send_error(ERR_INVALID_PATH);
+        return;
+    }
+    
+    const char* path = reinterpret_cast<const char*>(payload);
+    ESP_LOGD(TAG, "STAT: %s", path);
+    
+    FileStat stat_info = {};
+    bool is_dir = false;
+    
+    esp_err_t ret = m_storage_manager->stat_file(path, &stat_info.size, 
+                                            &stat_info.timestamp, &is_dir);
+    
+    if (ret != ESP_OK) {
+        send_error(ERR_FILE_NOT_FOUND);
+        return;
+    }
+    
+    stat_info.is_directory = is_dir ? 1 : 0;
+    send_frame(CMD_STAT, &stat_info, sizeof(stat_info));
+}
+
+void FileProtocol::handle_space_info(const uint8_t* payload, uint16_t length) {
+    if (!payload || length == 0) {
+        send_error(ERR_INVALID_PATH);
+        return;
+    }
+    
+    const char* path = reinterpret_cast<const char*>(payload);
+    if (m_storage_manager->validate_path(path) != ESP_OK) {
+        send_error(ERR_INVALID_PATH);
+        return;
+    }
+    ESP_LOGD(TAG, "SPACE_INFO: %s", path);
+    
+    uint64_t total = 0, free = 0;
+    esp_err_t ret = m_storage_manager->get_space_info(path, &total, &free);
+    
+    if (ret != ESP_OK) {
+        send_error(ERR_FS_NOT_MOUNTED);
+        return;
+    }
+    
+    SpaceInfo info = {};
+    info.total_bytes = total;
+    info.free_bytes = free;
+    info.used_bytes = total - free;
+    info.block_size = 4096;
+    
+    send_frame(CMD_SPACE_INFO, &info, sizeof(info));
+}
+
+// ============================================================================
+// File Transfer - Download (GET)
+// ============================================================================
+
+void FileProtocol::handle_get_file_begin(const uint8_t* payload, uint16_t length) {
+    ESP_LOGI(TAG, "GET_FILE_BEGIN: Starting download...");
+    
+    if (m_transfer_active) {
+        ESP_LOGW(TAG, "Transfer already active");
+        send_error(ERR_TRANSFER_ACTIVE);
+        return;
+    }
+    
+    if (!payload || length == 0) {
+        ESP_LOGE(TAG, "Invalid payload");
+        send_error(ERR_INVALID_PATH);
+        return;
+    }
+    
+    const char* path = reinterpret_cast<const char*>(payload);
+    if (m_storage_manager->validate_path(path) != ESP_OK) {
+        send_error(ERR_INVALID_PATH);
+        return;
+    }
+    
+    // Check if backend exists and is mounted
+    StorageBackend* backend = m_storage_manager->get_backend_for_path(path);
+    if (!backend || !backend->is_mounted()) {
+        ESP_LOGE(TAG, "Filesystem not mounted for path: %s", path);
+        send_error_ex(ERR_FS_NOT_MOUNTED, "Filesystem not mounted", 0);
+        return;
+    }
+    
+    // Open file for reading
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        ESP_LOGE(TAG, "File not found: %s", path);
+        send_error(ERR_FILE_NOT_FOUND);
+        return;
+    }
+
+    m_transfer_active = true;
+    
+    // Get file size
+    fseek(f, 0, SEEK_END);
+    long file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    
+    // Send ACK with file size
+    uint64_t size_payload = file_size;
+    send_frame(CMD_ACK, &size_payload, sizeof(size_payload));
+    
+    // NOTE: Log suppression DISABLED for debugging
+    // suppress_logs_if_needed();
+    
+    // Send file in chunks using hardware flow control
+    // Hardware Flow Control (RTS/CTS) automatically throttles transmission
+    // when receiver buffer fills up - no artificial delay needed!
+    uint8_t buffer[PROTO_FILE_CHUNK_SIZE];  // 8KB chunks for optimal throughput
+    size_t bytes_sent = 0;
+    size_t chunk_size;
+    uint32_t chunk_count = 0;
+    
+    while ((chunk_size = fread(buffer, 1, sizeof(buffer), f)) > 0) {
+        send_frame(CMD_GET_FILE_DATA, buffer, chunk_size);
+        bytes_sent += chunk_size;
+        chunk_count++;
+        
+        // Hardware Flow Control (RTS/CTS) automatically manages data flow
+        // Only yield occasionally to prevent watchdog timeout on very large files
+        if ((chunk_count % 100) == 0) {
+            taskYIELD();  // Allow other tasks to run every 100 chunks
+        }
+        
+        // Send progress every 10 chunks
+        if ((chunk_count % 10) == 0) {
+            send_progress(bytes_sent, file_size);
+        }
+    }
+    
+    fclose(f);
+    
+    // Send end marker
+    send_frame(CMD_GET_FILE_END, nullptr, 0);
+    
+    // Clear transfer state after download completes
+    m_transfer_active = false;
+    m_transfer_total = 0;
+    m_transfer_bytes = 0;
+    
+    // NOTE: Log suppression was disabled, no need to restore
+    // restore_logs_if_needed();
+    
+    ESP_LOGI(TAG, "File transfer complete: %zu bytes in %u chunks", bytes_sent, chunk_count);
+}
+
+// ============================================================================
+// File Transfer - Upload (PUT)
+// ============================================================================
+
+void FileProtocol::handle_put_file_begin(const uint8_t* payload, uint16_t length) {
+    // Mute console during file transfer to prevent interference with binary protocol
+    esp_log_level_set("*", ESP_LOG_ERROR);
+    
+    if (m_transfer_active) {
+        send_error_ex(ERR_TRANSFER_ACTIVE, "Another transfer is already in progress", m_transfer_bytes);
+        return;
+    }
+    
+    if (!payload || length < sizeof(uint64_t) + 1) {
+        send_error_ex(ERR_INVALID_PATH, "Missing file size or path in upload request", length);
+        return;
+    }
+    
+    // Payload format: [file_size:8 bytes][path:string]
+    const uint64_t* size_ptr = reinterpret_cast<const uint64_t*>(payload);
+    const char* path = reinterpret_cast<const char*>(payload + sizeof(uint64_t));
+    const size_t path_capacity = length - sizeof(uint64_t);
+    const size_t path_length = strnlen(path, path_capacity);
+    if (path_length == path_capacity || path_length >= sizeof(m_transfer_path)) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "Path too long (%zu chars, max %zu)", path_length, sizeof(m_transfer_path) - 1);
+        send_error_ex(ERR_PATH_TOO_LONG, msg, path_length);
+        return;
+    }
+    
+    m_transfer_total = *size_ptr;
+    memcpy(m_transfer_path, path, path_length);
+    m_transfer_path[path_length] = '\0';
+
+    if (path_length + sizeof(UPLOAD_TEMP_SUFFIX) > sizeof(m_transfer_temp_path)) {
+        send_error_ex(ERR_PATH_TOO_LONG, "Path + temp suffix exceeds limit", path_length + sizeof(UPLOAD_TEMP_SUFFIX));
+        return;
+    }
+    memcpy(m_transfer_temp_path, m_transfer_path, path_length);
+    memcpy(m_transfer_temp_path + path_length, UPLOAD_TEMP_SUFFIX, sizeof(UPLOAD_TEMP_SUFFIX));
+    
+    ESP_LOGI(TAG, "PUT_FILE_BEGIN: %s (%llu bytes)", m_transfer_path, m_transfer_total);
+    
+    // BENCHMARK MODE: Bypass SD card
+    if (strcmp(m_transfer_path, "/dev/null") == 0) {
+        ESP_LOGI(TAG, "BENCHMARK MODE: Bypassing SD card writes for pure UART throughput testing");
+        m_benchmark_mode = true;
+        m_transfer_active = true;
+        m_transfer_bytes = 0;
+        send_ack();
+        return;
+    }
+    m_benchmark_mode = false;
+
+    if (m_storage_manager->validate_path(m_transfer_path) != ESP_OK) {
+        send_error_ex(ERR_INVALID_PATH, "Path validation failed (invalid characters or format)", 0);
+        return;
+    }
+    
+    // Ensure target backend exists and is mounted
+    StorageBackend* backend = m_storage_manager->get_backend_for_path(m_transfer_path);
+    if (!backend || !backend->is_mounted()) {
+        ESP_LOGE(TAG, "Filesystem not mounted for path: %s", m_transfer_path);
+        send_error_ex(ERR_FS_NOT_MOUNTED, "Filesystem not mounted", 0);
+        return;
+    }
+    
+    // Check if enough space is available on the target backend
+    uint64_t total_bytes = 0;
+    uint64_t free_bytes = 0;
+    esp_err_t ret = m_storage_manager->get_space_info(m_transfer_path, &total_bytes, &free_bytes);
+    if (ret == ESP_OK) {
+        // Add 10% safety margin for filesystem overhead
+        uint64_t required_bytes = m_transfer_total + (m_transfer_total / 10);
+        
+        if (free_bytes < required_bytes) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "Storage full: need %llu MB, have %llu MB free", 
+                     required_bytes / (1024*1024), free_bytes / (1024*1024));
+            ESP_LOGE(TAG, "%s", msg);
+            send_error_ex(ERR_DISK_FULL, msg, free_bytes);
+            return;
+        }
+        
+        ESP_LOGI(TAG, "Space check OK: %llu bytes free (need %llu)", free_bytes, required_bytes);
+    } else {
+        ESP_LOGD(TAG, "Space check skipped or not supported: %s", esp_err_to_name(ret));
+    }
+    
+    // Open file for writing
+    m_transfer_file = fopen(m_transfer_temp_path, "wb");
+    if (!m_transfer_file) {
+        char msg[384];  // Increased from 128 to accommodate long paths (256) + errno message
+        snprintf(msg, sizeof(msg), "Failed to create file: %s (errno=%d)", m_transfer_temp_path, errno);
+        ESP_LOGE(TAG, "%s", msg);
+        send_error_ex(ERR_IO_ERROR, msg, errno);
+        return;
+    }
+    
+    // CRITICAL PERFORMANCE FIX: Buffer writes to reduce SD card latency!
+    // NOTE: Buffer must be in heap/static storage, NOT stack!
+    // Allocate from heap to avoid stack overflow and track in member variable
+    m_sd_write_buffer = (char*)malloc(32768);
+    if (m_sd_write_buffer && setvbuf(m_transfer_file, m_sd_write_buffer, _IOFBF, 32768) == 0) {
+        ESP_LOGI(TAG, "Write buffering enabled (32KB) for optimal SD performance");
+    } else {
+        ESP_LOGW(TAG, "Failed to set write buffer, performance may be reduced");
+        if (m_sd_write_buffer) free(m_sd_write_buffer);
+        m_sd_write_buffer = nullptr;
+    }
+    
+    m_transfer_active = true;
+    m_transfer_bytes = 0;
+    m_transfer_failed = false;
+    
+    // Suppress logs during transfer for optimal performance
+    suppress_logs_if_needed();
+    
+    send_ack();
+}
+
+void FileProtocol::handle_put_file_data(const uint8_t* payload, uint16_t length) {
+    if (!m_transfer_active) {
+        send_error(ERR_NO_TRANSFER);
+        return;
+    }
+    
+    if (!m_benchmark_mode && !m_transfer_file) {
+        send_error(ERR_NO_TRANSFER);
+        return;
+    }
+    
+    if (!payload || length == 0) {
+        return;
+    }
+
+    if (m_transfer_bytes > m_transfer_total ||
+        static_cast<uint64_t>(length) > m_transfer_total - m_transfer_bytes) {
+        ESP_LOGE(TAG, "Upload exceeds declared size: received=%llu, chunk=%u, total=%llu",
+                 m_transfer_bytes, length, m_transfer_total);
+        m_transfer_failed = true;
+        abort_active_transfer();
+        send_error(ERR_IO_ERROR);
+        return;
+    }
+    
+    if (m_benchmark_mode) {
+        // Benchmark mode: Just discard data and acknowledge
+        m_transfer_bytes += length;
+    } else {
+        // Write chunk to file (with 32KB write buffer, SD blocking is OK)
+        size_t written = fwrite(payload, 1, length, m_transfer_file);
+        
+        if (written != length) {
+            ESP_LOGE(TAG, "Write error: expected %u, wrote %zu", length, written);
+            abort_active_transfer();
+            send_error(ERR_IO_ERROR);
+            return;
+        }
+        
+        m_transfer_bytes += written;
+    }
+    
+    // NOTE: Watchdog is DISABLED for UART RX task (see main.cpp)
+    // No vTaskDelay needed - let's transfer at full speed!
+    // If fwrite() blocks too long, Hardware Flow Control will backpressure PC
+    
+    // DEBUG: Log progress and heap every 100KB to detect memory leaks
+    if ((m_transfer_bytes % (100 * 1024)) == 0) {
+        ESP_LOGI(TAG, "Progress: %llu KB, Free heap: %u bytes, Stack high water: %u", 
+                 m_transfer_bytes / 1024, 
+                 esp_get_free_heap_size(),
+                 uxTaskGetStackHighWaterMark(nullptr));
+    }
+    
+    // Streaming mode: No ACK per chunk. Hardware Flow Control will throttle the PC if needed.
+}
+
+void FileProtocol::handle_put_file_end() {
+    if (!m_transfer_active) {
+        send_error(ERR_NO_TRANSFER);
+        return;
+    }
+    
+    if (m_transfer_failed || m_transfer_bytes != m_transfer_total) {
+        ESP_LOGE(TAG, "Upload size mismatch: received=%llu, expected=%llu",
+                 m_transfer_bytes, m_transfer_total);
+        abort_active_transfer();
+        send_error(ERR_IO_ERROR);
+        return;
+    }
+
+    // Restore logs before logging final message
+    restore_logs_if_needed();
+    
+    ESP_LOGI(TAG, "PUT_FILE_END: %llu bytes received", m_transfer_bytes);
+    
+    if (m_transfer_file && fclose(m_transfer_file) != 0) {
+        m_transfer_file = nullptr;
+        abort_active_transfer();
+        send_error(ERR_IO_ERROR);
+        return;
+    }
+    m_transfer_file = nullptr;
+
+    if (m_sd_write_buffer) {
+        free(m_sd_write_buffer);
+        m_sd_write_buffer = nullptr;
+    }
+
+    if (!m_benchmark_mode) {
+        // CRITICAL: Give SD card time to finish physical writes before rename
+        // This prevents NACK on next upload when SD controller is still busy
+        vTaskDelay(pdMS_TO_TICKS(50));
+        
+        struct stat existing_path;
+        if (stat(m_transfer_path, &existing_path) == 0) {
+            if (S_ISDIR(existing_path.st_mode) || unlink(m_transfer_path) != 0) {
+                ESP_LOGE(TAG, "Failed to replace existing upload target %s: errno=%d",
+                         m_transfer_path, errno);
+                abort_active_transfer();
+                send_error(ERR_IO_ERROR);
+                return;
+            }
+        }
+        if (rename(m_transfer_temp_path, m_transfer_path) != 0) {
+            ESP_LOGE(TAG, "Failed to commit upload %s: errno=%d", m_transfer_path, errno);
+            abort_active_transfer();
+            send_error(ERR_IO_ERROR);
+            return;
+        }
+        
+        // Additional delay after rename to ensure SD filesystem updates complete
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    
+    m_transfer_active = false;
+    m_transfer_path[0] = '\0';
+    m_transfer_temp_path[0] = '\0';
+    m_transfer_bytes = 0;
+    m_transfer_total = 0;
+    m_benchmark_mode = false;
+    
+    send_ack();
+}
+
+void FileProtocol::handle_put_file_abort() {
+    ESP_LOGW(TAG, "PUT_FILE_ABORT");
+    
+    // Restore console output if transfer was active
+    restore_logs_if_needed();
+    
+    abort_active_transfer();
+    
+    send_ack();
+}
+
+// ============================================================================
+// File Operations
+// ============================================================================
+
+void FileProtocol::handle_delete(const uint8_t* payload, uint16_t length) {
+    // [FIX] Check if transfer is active
+    if (m_transfer_active) {
+        ESP_LOGW(TAG, "Cannot delete: transfer active");
+        send_error(ERR_TRANSFER_ACTIVE);
+        return;
+    }
+    
+    if (!payload || length == 0) {
+        send_error(ERR_INVALID_PATH);
+        return;
+    }
+    
+    const char* path = reinterpret_cast<const char*>(payload);
+    ESP_LOGD(TAG, "DELETE: %s", path);
+    
+    // Check if target is a directory
+    uint64_t size = 0;
+    uint32_t timestamp = 0;
+    bool is_dir = false;
+    esp_err_t stat_ret = m_storage_manager->stat_file(path, &size, &timestamp, &is_dir);
+    
+    // Industrial-Grade: Handle file-not-found gracefully (idempotent delete)
+    if (stat_ret == ESP_ERR_NOT_FOUND) {
+        ESP_LOGD(TAG, "DELETE: file not found (already deleted): %s", path);
+        send_ack();  // Idempotent: ACK even if file doesn't exist
+        return;
+    }
+    
+    esp_err_t ret;
+    if (stat_ret == ESP_OK && is_dir) {
+        ret = m_storage_manager->delete_directory_recursive(path);
+    } else {
+        ret = m_storage_manager->delete_file(path);
+        if (ret == ESP_ERR_INVALID_STATE) {
+            ret = m_storage_manager->delete_directory_recursive(path);
+        }
+    }
+    
+    if (ret == ESP_OK) {
+        send_ack();
+    } else if (ret == ESP_ERR_NOT_FOUND) {
+        // Idempotent: treat as success if file disappeared during operation
+        ESP_LOGD(TAG, "DELETE: file vanished during operation: %s", path);
+        send_ack();
+    } else {
+        ESP_LOGE(TAG, "DELETE failed: %s (error=%d)", path, ret);
+        send_error(ERR_IO_ERROR);  // Real I/O errors only
+    }
+}
+
+void FileProtocol::handle_rename(const uint8_t* payload, uint16_t length) {
+    // [FIX] Check if transfer is active
+    if (m_transfer_active) {
+        ESP_LOGW(TAG, "Cannot rename: transfer active");
+        send_error(ERR_TRANSFER_ACTIVE);
+        return;
+    }
+    
+    if (!payload || length < 2) {
+        send_error(ERR_INVALID_PATH);
+        return;
+    }
+    
+    // Payload format: [old_path\0new_path\0]
+    const char* old_path = reinterpret_cast<const char*>(payload);
+    size_t old_len = strnlen(old_path, length);
+    
+    if (old_len + 1 >= length) {
+        send_error(ERR_INVALID_PATH);
+        return;
+    }
+    
+    const char* new_path = old_path + old_len + 1;
+    if (strnlen(new_path, length - old_len - 1) == length - old_len - 1) {
+        send_error(ERR_INVALID_PATH);
+        return;
+    }
+    
+    ESP_LOGI(TAG, "RENAME: %s -> %s", old_path, new_path);
+    
+    esp_err_t ret = m_storage_manager->rename_file(old_path, new_path);
+    
+    if (ret == ESP_OK) {
+        send_ack();
+    } else {
+        send_error(ERR_IO_ERROR);
+    }
+}
+
+void FileProtocol::handle_mkdir(const uint8_t* payload, uint16_t length) {
+    // [FIX] Check if transfer is active
+    if (m_transfer_active) {
+        ESP_LOGW(TAG, "Cannot mkdir: transfer active");
+        send_error(ERR_TRANSFER_ACTIVE);
+        return;
+    }
+    
+    if (!payload || length == 0) {
+        send_error(ERR_INVALID_PATH);
+        return;
+    }
+    
+    const char* path = reinterpret_cast<const char*>(payload);
+    ESP_LOGI(TAG, "MKDIR: %s", path);
+    
+    esp_err_t ret = m_storage_manager->create_directory(path);
+    
+    if (ret == ESP_OK) {
+        send_ack();
+    } else {
+        send_error(ERR_IO_ERROR);
+    }
+}
+
+void FileProtocol::handle_copy(const uint8_t* payload, uint16_t length) {
+    if (!payload || length < 2) {
+        send_error(ERR_INVALID_PATH);
+        return;
+    }
+    
+    // Payload format: [src_path\0dst_path\0]
+    const char* src_path = reinterpret_cast<const char*>(payload);
+    size_t src_len = strnlen(src_path, length);
+    
+    if (src_len + 1 >= length) {
+        send_error(ERR_INVALID_PATH);
+        return;
+    }
+    
+    const char* dst_path = src_path + src_len + 1;
+    if (strnlen(dst_path, length - src_len - 1) == length - src_len - 1) {
+        send_error(ERR_INVALID_PATH);
+        return;
+    }
+    
+    ESP_LOGI(TAG, "COPY: %s -> %s", src_path, dst_path);
+    
+    esp_err_t ret = m_storage_manager->copy_file(src_path, dst_path);
+    
+    if (ret == ESP_OK) {
+        send_ack();
+    } else {
+        send_error(ERR_IO_ERROR);
+    }
+}
+
+void FileProtocol::handle_hash_file(const uint8_t* payload, uint16_t length) {
+    if (!payload || length == 0) {
+        send_error(ERR_INVALID_PATH);
+        return;
+    }
+    
+    const char* path = reinterpret_cast<const char*>(payload);
+    ESP_LOGI(TAG, "HASH_FILE: %s", path);
+    
+    uint32_t hash = 0;
+    esp_err_t ret = m_storage_manager->hash_file(path, &hash);
+    
+    if (ret == ESP_OK) {
+        send_frame(CMD_HASH_FILE, &hash, sizeof(hash));
+    } else {
+        send_error(ERR_FILE_NOT_FOUND);
+    }
+}
+
+
+void FileProtocol::handle_format_fs(const uint8_t* payload, uint16_t length) {
+    if (m_transfer_active) {
+        send_error(ERR_TRANSFER_ACTIVE);
+        return;
+    }
+    
+    if (!payload || length < 1) {
+        send_error(ERR_INVALID_PATH);
+        return;
+    }
+    
+    uint8_t fs_type = payload[0];
+    esp_err_t ret = ESP_FAIL;
+    
+    if (fs_type == FSTYPE_FAT32 || fs_type == FSTYPE_EXFAT) {
+        ESP_LOGW(TAG, "Format requested for SD Card");
+        
+        // Get SD backend and format it
+        StorageBackend* sd_backend = m_storage_manager->get_backend_by_mount("/sd");
+        if (sd_backend) {
+            ret = sd_backend->format();
+        } else {
+            ESP_LOGE(TAG, "SD backend not found");
+            send_error(ERR_FS_NOT_MOUNTED);
+            return;
+        }
+    } else {
+        ESP_LOGE(TAG, "Format requested for unknown FS type: %d", fs_type);
+        send_error(ERR_INVALID_PATH);
+        return;
+    }
+    
+    if (ret == ESP_OK) {
+        send_ack();
+    } else {
+        send_error(ERR_IO_ERROR);
+    }
+}
+
+
+
+
+
+
+// ============================================================================
+// Command Handlers - Storage Backend Discovery (v2.0)
+// ============================================================================
+
+void FileProtocol::handle_storage_list() {
+    send_ack();
+    
+    if (!m_storage_manager) {
+        send_frame(CMD_LIST_END, nullptr, 0);
+        return;
+    }
+    
+    size_t backend_count = m_storage_manager->get_backend_count();
+    
+    for (size_t i = 0; i < backend_count; i++) {
+        StorageBackend* backend = m_storage_manager->get_backend(i);
+        if (!backend) {
+            continue;
+        }
+        
+        // INDUSTRIAL-GRADE: Call thread-safe accessors directly instead of get_backend_info()
+        // to avoid ESP_LOG* reentrancy crash with multiplexer
+        uint8_t buffer[118];
+        memset(buffer, 0, sizeof(buffer));
+        
+        // Mount point [64 bytes] - Offset 0
+        const char* mount_point = backend->get_mount_point();
+        if (mount_point) {
+            strncpy((char*)buffer, mount_point, 63);
+            buffer[63] = '\0';
+        }
+        
+        // Type [1 byte] - Offset 64 (always 0 for now - could be enhanced)
+        buffer[64] = 0;
+        
+        // Type name [32 bytes] - Offset 65
+        const char* type_name = backend->get_type_name();
+        if (type_name) {
+            strncpy((char*)(buffer + 65), type_name, 31);
+            buffer[96] = '\0';
+        }
+        
+        // Capabilities [4 bytes] - Offset 97
+        uint32_t caps = backend->get_capabilities();
+        memcpy(buffer + 97, &caps, 4);
+        
+        // Mounted status [1 byte] - Offset 101
+        buffer[101] = backend->is_mounted() ? 1 : 0;
+        
+        // Total/Free bytes [8+8 bytes] - Offset 102, 110
+        // Get filesystem size info with log suppression to avoid COBS reentrancy
+        uint64_t total_bytes = 0;
+        uint64_t free_bytes = 0;
+        
+        if (backend->is_mounted()) {
+            // Temporarily suppress logs to prevent reentrancy during get_space_info
+            const char* backend_tag = nullptr;
+            StorageType type = backend->get_type();
+            
+            if (type == StorageType::SPIFFS) {
+                backend_tag = "storage_spiffs";
+            } else if (type == StorageType::FLASH_FAT) {
+                backend_tag = "storage_flash_fat";
+            } else if (type == StorageType::LITTLEFS) {
+                backend_tag = "storage_littlefs";
+            }
+            
+            if (backend_tag) {
+                esp_log_level_t saved = esp_log_level_get(backend_tag);
+                esp_log_level_set(backend_tag, ESP_LOG_NONE);
+                
+                backend->get_space_info(&total_bytes, &free_bytes);
+                
+                esp_log_level_set(backend_tag, saved);
+            } else {
+                backend->get_space_info(&total_bytes, &free_bytes);
+            }
+        }
+        
+        memcpy(buffer + 102, &total_bytes, 8);
+        memcpy(buffer + 110, &free_bytes, 8);
+        
+        send_frame(CMD_LIST_ENTRY, buffer, 118);
+        taskYIELD();
+    }
+    
+    send_frame(CMD_LIST_END, nullptr, 0);
+}
+
+void FileProtocol::handle_storage_info(const uint8_t* payload, uint16_t length) {
+    if (!payload || length == 0) {
+        send_error(ERR_INVALID_PATH);
+        return;
+    }
+    
+    // Payload is mount point string
+    const char* mount_point = reinterpret_cast<const char*>(payload);
+    ESP_LOGI(TAG, "STORAGE_INFO requested for: %s", mount_point);
+    
+    // Find backend by mount point
+    StorageBackend* backend = m_storage_manager->get_backend_by_mount(mount_point);
+    if (!backend) {
+        ESP_LOGE(TAG, "Backend not found: %s", mount_point);
+        send_error(ERR_FILE_NOT_FOUND);
+        return;
+    }
+    
+    // Get backend info
+    StorageBackendInfo info = {};
+    esp_err_t ret = backend->get_backend_info(&info);
+    
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get backend info: %s", esp_err_to_name(ret));
+        send_error(ERR_IO_ERROR);
+        return;
+    }
+    
+    // Manually serialize to ensure exact 118-byte layout for Python protocol
+    // Format: mount_point[64] + type(1) + type_name[32] + capabilities(4) + mounted(1) + total(8) + free(8)
+    uint8_t buffer[118];
+    memset(buffer, 0, sizeof(buffer));
+    
+    // Copy fields with exact offsets
+    memcpy(buffer + 0, info.mount_point, 64);      // Offset 0: mount_point[64]
+    buffer[64] = info.type;                         // Offset 64: type(1)
+    memcpy(buffer + 65, info.type_name, 32);       // Offset 65: type_name[32]
+    memcpy(buffer + 97, &info.capabilities, 4);    // Offset 97: capabilities(4)
+    buffer[101] = info.mounted;                    // Offset 101: mounted(1)
+    memcpy(buffer + 102, &info.total_bytes, 8);    // Offset 102: total_bytes(8)
+    memcpy(buffer + 110, &info.free_bytes, 8);     // Offset 110: free_bytes(8)
+    // Total: 64 + 1 + 32 + 4 + 1 + 8 + 8 = 118 bytes
+    
+    // Send backend info
+    send_frame(CMD_STORAGE_INFO, buffer, 118);
+}

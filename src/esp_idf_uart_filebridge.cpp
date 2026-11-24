@@ -1,0 +1,505 @@
+/*
+ * esp-idf-uart-filebridge - Top-Level Init/Deinit Implementation
+ *
+ * Wires together: UART driver, StorageManager, FileProtocol, RX task.
+ * Usable from both C and C++ application code.
+ */
+
+#include "esp_idf_uart_filebridge.h"
+#include "file_protocol.h"
+#include "storage_manager.h"
+#include "uart_mux.h"
+
+#include <cstring>
+#include <cstdarg>
+#include <new>
+#include "esp_log.h"
+#include "esp_heap_caps.h"
+#include "esp_task_wdt.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/uart.h"
+#include "soc/soc_caps.h"
+
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+#include "driver/usb_serial_jtag.h"
+#endif
+
+static const char *TAG = "uart_filebridge";
+
+/* --------------------------------------------------------------------------
+ * Module-private state
+ * -------------------------------------------------------------------------- */
+static FileProtocol     *s_protocol   = nullptr;
+static StorageManager *s_storage_manager = nullptr;
+static TaskHandle_t       s_rx_task   = nullptr;
+static uart_filebridge_transport_t s_transport = UART_FILEBRIDGE_TRANSPORT_UART;
+static uart_port_t        s_uart_num  = UART_NUM_1;
+static bool               s_running   = false;
+static bool               s_runtime_ready = false;
+static esp_idf_uart_filebridge_config_t s_cfg = {};
+static mux_decoder_t      s_mux_decoder;  // Multiplexer decoder for RX
+
+/* --------------------------------------------------------------------------
+ * Console Output Multiplexing
+ * -------------------------------------------------------------------------- */
+
+/**
+ * Multiplexed console output function
+ * Wraps all ESP_LOG* output and printf() in MUX_TYPE_CONSOLE frames
+ */
+static int mux_vprintf(const char *fmt, va_list args) {
+    // Format string to buffer
+    char buffer[256];
+    int len = vsnprintf(buffer, sizeof(buffer), fmt, args);
+    
+    if (len > 0 && s_runtime_ready) {
+        // Wrap in multiplexer frame (TYPE=0x01 Console)
+        static uint8_t mux_frame[MUX_MAX_FRAME_SIZE];
+        size_t mux_len = 0;
+        
+        esp_err_t ret = mux_encode_frame(MUX_TYPE_CONSOLE, (const uint8_t*)buffer, 
+                                         (size_t)len, mux_frame, &mux_len);
+        
+        if (ret == ESP_OK) {
+            // Send directly via UART (bypass protocol layer)
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+            if (s_transport == UART_FILEBRIDGE_TRANSPORT_USB_SERIAL_JTAG) {
+                usb_serial_jtag_write_bytes(mux_frame, mux_len, pdMS_TO_TICKS(100));
+            } else
+#endif
+            {
+                uart_write_bytes(s_uart_num, mux_frame, mux_len);
+            }
+        }
+    }
+    
+    return len;
+}
+
+static esp_err_t bridge_tx_cb(const uint8_t *data, size_t len) {
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    if (s_transport == UART_FILEBRIDGE_TRANSPORT_USB_SERIAL_JTAG) {
+        size_t total_written = 0;
+        while (total_written < len) {
+            int written = usb_serial_jtag_write_bytes(data + total_written, len - total_written, pdMS_TO_TICKS(1000));
+            if (written < 0) {
+                ESP_LOGE(TAG, "USB_SERIAL_JTAG write error");
+                return ESP_FAIL;
+            }
+            total_written += (size_t)written;
+        }
+        return ESP_OK;
+    }
+#endif
+    int written = uart_write_bytes(s_uart_num, data, len);
+    if (written < 0 || (size_t)written != len) {
+        ESP_LOGE(TAG, "UART write error: expected %d wrote %d", (int)len, written);
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t ensure_runtime_ready(void) {
+    if (s_runtime_ready) {
+        return ESP_OK;
+    }
+
+    /* Lazy-init StorageManager + SD mount on first data arrival.
+     * This runs on the RX task stack (16 KB), NOT the main task stack (12 KB).
+     * esp_vfs_fat_sdmmc_mount is very stack-heavy and would overflow main. */
+    if (!s_storage_manager) {
+        s_storage_manager = new (std::nothrow) StorageManager();
+        if (!s_storage_manager) {
+            ESP_LOGE(TAG, "StorageManager allocation failed");
+            return ESP_ERR_NO_MEM;
+        }
+
+        esp_err_t fs_ret = s_storage_manager->init(s_cfg.sd_mount_point, s_cfg.mount_sd_own);
+        if (fs_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Storage init returned: %s", esp_err_to_name(fs_ret));
+        }
+    }
+
+    s_protocol = new (std::nothrow) FileProtocol();
+    if (!s_protocol) {
+        ESP_LOGE(TAG, "FileProtocol allocation failed");
+        delete s_storage_manager;
+        s_storage_manager = nullptr;
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t ret = s_protocol->init(s_storage_manager, s_uart_num, s_transport);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "FileProtocol::init failed: %s", esp_err_to_name(ret));
+        delete s_protocol;
+        s_protocol = nullptr;
+        delete s_storage_manager;
+        s_storage_manager = nullptr;
+        return ret;
+    }
+
+    s_protocol->set_tx_callback(bridge_tx_cb);
+    s_runtime_ready = true;
+    ESP_LOGI(TAG, "Runtime activated lazily (SD at %s)", s_cfg.sd_mount_point);
+    return ESP_OK;
+}
+
+/* --------------------------------------------------------------------------
+ * Transport RX Task - With Multiplexing
+ * -------------------------------------------------------------------------- */
+static void uart_rx_task(void *arg) {
+    const int buf_size = s_cfg.rx_buf_size ? s_cfg.rx_buf_size : CONFIG_UART_FILEBRIDGE_RX_BUF_SIZE;
+    uint8_t  *rx_buf   = (uint8_t *)malloc(buf_size);
+
+    if (!rx_buf) {
+        ESP_LOGE(TAG, "Failed to allocate RX buffer (%d bytes)", buf_size);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    // Initialize multiplexer decoder
+    mux_decoder_init(&s_mux_decoder);
+
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    if (s_transport == UART_FILEBRIDGE_TRANSPORT_USB_SERIAL_JTAG) {
+        ESP_LOGI(TAG, "RX task started on Native USB-Serial/JTAG (with COBS multiplexing)");
+    } else
+#endif
+    {
+        ESP_LOGI(TAG, "RX task started on UART%d (with COBS multiplexing)", (int)s_uart_num);
+    }
+
+    while (1) {
+        int len = 0;
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+        if (s_transport == UART_FILEBRIDGE_TRANSPORT_USB_SERIAL_JTAG) {
+            len = usb_serial_jtag_read_bytes(rx_buf, buf_size, pdMS_TO_TICKS(100));
+        } else
+#endif
+        {
+            len = uart_read_bytes(s_uart_num, rx_buf, buf_size, pdMS_TO_TICKS(100));
+        }
+
+        if (len > 0) {
+            // Feed bytes into multiplexer decoder
+            for (int i = 0; i < len; i++) {
+                esp_err_t ret = mux_decoder_feed(&s_mux_decoder, rx_buf[i]);
+                
+                if (ret == ESP_OK) {
+                    // Frame complete - dispatch based on type
+                    if (s_mux_decoder.type == MUX_TYPE_CONSOLE) {
+                        // Console echo from PC (normally we ignore this)
+                        // Could log it if needed for debugging
+                        
+                    } else if (s_mux_decoder.type == MUX_TYPE_PROTOCOL) {
+                        // Binary filebridge protocol frame
+                        
+                        // Lazy-initialize runtime on first protocol frame
+                        if (!s_runtime_ready) {
+                            size_t free_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+                            ESP_LOGI(TAG, "Activating lazy runtime: SRAM free before = %u bytes", (unsigned)free_before);
+                            esp_err_t init_ret = ensure_runtime_ready();
+                            size_t free_after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+                            ESP_LOGI(TAG, "Lazy runtime ready: SRAM free after = %u bytes, result=%s",
+                                     (unsigned)free_after, esp_err_to_name(init_ret));
+                            if (init_ret != ESP_OK) {
+                                ESP_LOGE(TAG, "Lazy runtime activation failed: %s", esp_err_to_name(init_ret));
+                                mux_decoder_reset(&s_mux_decoder);
+                                continue;
+                            }
+                            
+                            // BOOT_READY is sent automatically after first HELLO in file_protocol.cpp
+                            // Single point of truth for deterministic boot synchronization
+                        }
+                        
+                        // Process protocol frame
+                        s_protocol->process_rx_data(s_mux_decoder.payload, s_mux_decoder.payload_len);
+                    }
+                    
+                    // Reset decoder for next frame
+                    mux_decoder_reset(&s_mux_decoder);
+                    
+                } else if (ret == ESP_ERR_INVALID_CRC) {
+                    // CRC error - decoder auto-resynced
+                    ESP_LOGW(TAG, "MUX frame CRC error - resyncing");
+                }
+                // ESP_FAIL means still accumulating - continue
+            }
+        }
+    }
+
+    /* Unreachable - task is deleted via esp_idf_uart_filebridge_deinit() */
+    free(rx_buf);
+    vTaskDelete(NULL);
+}
+
+/* --------------------------------------------------------------------------
+ * Public API
+ * -------------------------------------------------------------------------- */
+esp_err_t esp_idf_uart_filebridge_init(const esp_idf_uart_filebridge_config_t *cfg) {
+    if (!cfg) {
+        ESP_LOGE(TAG, "cfg must not be NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_running) {
+        ESP_LOGW(TAG, "Already initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (cfg->sd_mount_point &&
+        (cfg->sd_mount_point[0] != '/' || strlen(cfg->sd_mount_point) >= 64)) {
+        ESP_LOGE(TAG, "sd_mount_point must be an absolute path shorter than 64 bytes");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    s_transport = cfg->transport;
+    s_uart_num = cfg->uart_num;
+    s_cfg = *cfg;
+    s_runtime_ready = false;
+
+    /* ------------------------------------------------------------------ */
+    /* 1. Install Transport driver (Native USB-Serial/JTAG or UART)       */
+    /* ------------------------------------------------------------------ */
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    if (s_transport == UART_FILEBRIDGE_TRANSPORT_USB_SERIAL_JTAG) {
+        usb_serial_jtag_driver_config_t jtag_cfg = {
+            .tx_buffer_size = (uint32_t)(cfg->tx_buf_size ? cfg->tx_buf_size : CONFIG_UART_FILEBRIDGE_TX_BUF_SIZE),
+            .rx_buffer_size = (uint32_t)(cfg->rx_buf_size ? cfg->rx_buf_size : CONFIG_UART_FILEBRIDGE_RX_BUF_SIZE),
+        };
+        esp_err_t ret = usb_serial_jtag_driver_install(&jtag_cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "usb_serial_jtag_driver_install failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+        ESP_LOGI(TAG, "Native USB-Serial/JTAG configured: TX_BUF=%u RX_BUF=%u",
+                 (unsigned)jtag_cfg.tx_buffer_size, (unsigned)jtag_cfg.rx_buffer_size);
+    } else
+#endif
+    {
+        uart_config_t uart_cfg = {
+            .baud_rate           = cfg->baud_rate,
+            .data_bits           = UART_DATA_8_BITS,
+            .parity              = UART_PARITY_DISABLE,
+            .stop_bits           = UART_STOP_BITS_1,
+            .flow_ctrl           = (cfg->rts_pin >= 0 && cfg->cts_pin >= 0)
+                                    ? UART_HW_FLOWCTRL_CTS_RTS
+                                    : UART_HW_FLOWCTRL_DISABLE,
+            .rx_flow_ctrl_thresh = 96,
+            .source_clk          = UART_SCLK_DEFAULT,
+            .flags               = {},
+        };
+
+        esp_err_t ret = uart_param_config(cfg->uart_num, &uart_cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "uart_param_config failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+
+        ret = uart_set_pin(cfg->uart_num,
+                           cfg->tx_pin, cfg->rx_pin,
+                           (cfg->rts_pin >= 0) ? cfg->rts_pin : UART_PIN_NO_CHANGE,
+                           (cfg->cts_pin >= 0) ? cfg->cts_pin : UART_PIN_NO_CHANGE);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "uart_set_pin failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+
+        ret = uart_driver_install(cfg->uart_num,
+                                  cfg->rx_buf_size, cfg->tx_buf_size,
+                                  0, NULL, 0);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "uart_driver_install failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+
+        // Enable Software Flow Control (XON/XOFF) for stable transfers without RTS/CTS
+        // XON threshold: 0 (send XON when buffer nearly empty)
+        // XOFF threshold: 120 (send XOFF when buffer 75% full - leaves safety margin)
+        ret = uart_set_sw_flow_ctrl(cfg->uart_num, true, 0, 120);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "uart_set_sw_flow_ctrl failed: %s (continuing anyway)", esp_err_to_name(ret));
+        } else {
+            ESP_LOGI(TAG, "Software flow control (XON/XOFF) enabled");
+        }
+
+        ESP_LOGI(TAG, "UART%d configured: %d baud, TX=%d RX=%d RTS=%d CTS=%d",
+                 (int)cfg->uart_num, cfg->baud_rate,
+                 cfg->tx_pin, cfg->rx_pin, cfg->rts_pin, cfg->cts_pin);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* 2. Start RX Task (SD + Protocol init deferred to first RX data)     */
+    /* ------------------------------------------------------------------ */
+    BaseType_t rc = xTaskCreate(uart_rx_task, "uart_fb_rx",
+                                cfg->task_stack, NULL,
+                                cfg->task_priority, &s_rx_task);
+    if (rc != pdPASS) {
+        ESP_LOGE(TAG, "RX task creation failed");
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+        if (s_transport == UART_FILEBRIDGE_TRANSPORT_USB_SERIAL_JTAG) {
+            usb_serial_jtag_driver_uninstall();
+        } else
+#endif
+        {
+            uart_driver_delete(cfg->uart_num);
+        }
+        return ESP_ERR_NO_MEM;
+    }
+
+    s_running = true;
+    
+    // Install multiplexed console output handler
+    // This redirects all ESP_LOG* output through the multiplexer
+    esp_log_set_vprintf(mux_vprintf);
+    ESP_LOGI(TAG, "COBS multiplexing enabled (Console=0x01, Protocol=0x02)");
+    
+    ESP_LOGI(TAG, "esp-idf-uart-filebridge initialized in lazy mode (SD at %s)", cfg->sd_mount_point);
+    return ESP_OK;
+}
+
+
+esp_err_t esp_idf_uart_filebridge_deinit(void) {
+    if (!s_running) return ESP_OK;
+
+    if (s_rx_task) {
+        vTaskDelete(s_rx_task);
+        s_rx_task = nullptr;
+    }
+
+    if (s_protocol) {
+        delete s_protocol;
+        s_protocol = nullptr;
+    }
+
+    if (s_storage_manager) {
+        delete s_storage_manager;
+        s_storage_manager = nullptr;
+    }
+
+    s_runtime_ready = false;
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    if (s_transport == UART_FILEBRIDGE_TRANSPORT_USB_SERIAL_JTAG) {
+        usb_serial_jtag_driver_uninstall();
+    } else
+#endif
+    {
+        uart_driver_delete(s_uart_num);
+    }
+    s_running = false;
+    ESP_LOGI(TAG, "esp-idf-uart-filebridge deinitialized");
+    return ESP_OK;
+}
+
+bool esp_idf_uart_filebridge_is_running(void) {
+    return s_running;
+}
+
+esp_err_t esp_idf_uart_filebridge_pause(void) {
+    if (s_rx_task) {
+        vTaskSuspend(s_rx_task);
+    }
+    return ESP_OK;
+}
+
+esp_err_t esp_idf_uart_filebridge_resume(void) {
+    if (s_rx_task) {
+        vTaskResume(s_rx_task);
+    }
+    return ESP_OK;
+}
+
+extern "C" esp_err_t esp_idf_uart_filebridge_mount_sd(void) {
+    if (!s_running) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t ret = ensure_runtime_ready();
+    if (ret != ESP_OK || !s_cfg.mount_sd_own) {
+        return ret;
+    }
+    if (!s_storage_manager) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    StorageBackend *backend =
+        s_storage_manager->get_backend_by_mount(s_cfg.sd_mount_point);
+    if (!backend) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (backend->is_mounted()) {
+        return ESP_OK;
+    }
+    return backend->mount();
+}
+
+extern "C" esp_err_t esp_idf_uart_filebridge_init_storage_manager(void) {
+    if (!s_running) {
+        ESP_LOGE(TAG, "Cannot init storage manager - bridge not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    if (s_runtime_ready) {
+        ESP_LOGD(TAG, "Storage manager already initialized");
+        return ESP_OK;
+    }
+
+    /* Initialize StorageManager without mounting SD */
+    if (!s_storage_manager) {
+        s_storage_manager = new (std::nothrow) StorageManager();
+        if (!s_storage_manager) {
+            ESP_LOGE(TAG, "StorageManager allocation failed");
+            return ESP_ERR_NO_MEM;
+        }
+        
+        /* Initialize storage manager but skip SD mounting */
+        esp_err_t fs_ret = s_storage_manager->init(s_cfg.sd_mount_point, false);
+        if (fs_ret != ESP_OK && fs_ret != ESP_ERR_NOT_FOUND) {
+            ESP_LOGW(TAG, "Storage init returned: %s", esp_err_to_name(fs_ret));
+        }
+    }
+
+    /* Initialize FileProtocol */
+    s_protocol = new (std::nothrow) FileProtocol();
+    if (!s_protocol) {
+        ESP_LOGE(TAG, "FileProtocol allocation failed");
+        delete s_storage_manager;
+        s_storage_manager = nullptr;
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t ret = s_protocol->init(s_storage_manager, s_uart_num, s_transport);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "FileProtocol::init failed: %s", esp_err_to_name(ret));
+        delete s_protocol;
+        s_protocol = nullptr;
+        delete s_storage_manager;
+        s_storage_manager = nullptr;
+        return ret;
+    }
+
+    s_protocol->set_tx_callback(bridge_tx_cb);
+    s_runtime_ready = true;
+    ESP_LOGI(TAG, "Storage manager initialized (without SD mount)");
+    return ESP_OK;
+}
+
+#ifdef __cplusplus
+StorageManager* esp_idf_uart_filebridge_get_storage_manager(void) {
+    if (!s_runtime_ready) {
+        ESP_LOGW(TAG, "Storage manager not yet initialized - call esp_idf_uart_filebridge_mount_sd() first");
+        return nullptr;
+    }
+    return s_storage_manager;
+}
+
+esp_err_t esp_idf_uart_filebridge_send_boot_ready(void) {
+    if (!s_runtime_ready || !s_protocol) {
+        ESP_LOGW(TAG, "Filebridge not initialized - cannot send BOOT_READY");
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    // Send unsolicited BOOT_READY marker
+    s_protocol->send_frame(CMD_BOOT_READY, nullptr, 0);
+    ESP_LOGI(TAG, "BOOT_READY signal sent");
+    return ESP_OK;
+}
+#endif

@@ -1,0 +1,19 @@
+# Partition Table for 16MB Flash
+# Total Flash: 16MB (16,777,216 bytes / 0x1000000)
+#
+# Layout:
+#   nvs:       16 KB (0x9000 - 0xD000)
+#   phy_init:   4 KB (0xD000 - 0xE000)
+#   factory:    2 MB (0x10000 - 0x210000) - Application firmware
+#   flash:      4 MB (0x210000 - 0x610000) - Flash FAT with wear leveling
+#   littlefs:   4 MB (0x610000 - 0xA10000) - LittleFS partition
+#   spiffs:     5 MB (0xA10000 - 0xF10000) - SPIFFS partition
+#   Reserved: ~960 KB - End of flash margin
+#
+# Name,       Type, SubType,  Offset,   Size,  Flags
+nvs,          data, nvs,      0x9000,   16K,
+phy_init,     data, phy,      0xD000,    4K,
+factory,      app,  factory,  0x10000,   2M,
+flash,        data, fat,      0x210000,  4M,
+littlefs,     data, spiffs,   0x610000,  4M,
+spiffs,       data, spiffs,   0xA10000,  5M,

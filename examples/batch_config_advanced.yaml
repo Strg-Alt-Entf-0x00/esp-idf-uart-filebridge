@@ -1,0 +1,133 @@
+# Advanced batch configuration with conditional execution and retry policies
+# Usage: esp-idf-uart-filebridge batch examples/batch_config_advanced.yaml
+
+version: "1.0"
+description: "Advanced batch with conditional execution, verification, and cleanup"
+
+device:
+  port: "COM13"  # Windows: COM13, Linux: /dev/ttyUSB0, macOS: /dev/cu.usbserial
+  baud: 3000000
+  timeout: 120
+
+variables:
+  data_dir: "./data"              # Path to local data directory
+  assets_dir: "./assets"          # Path to local asset files
+  remote_base: "/sd"              # Target storage mount point (/sd, /flash, /lfs, /spiffs)
+  version: "v1.0"                 # Release version tag
+
+options:
+  verbose: true
+  progress_bar: true
+  fail_fast: false
+  error_policy: "retry"
+  default_retry:
+    max_attempts: 3
+    backoff_seconds: 2.0
+    exponential_backoff: true
+  state_file: ".batch_state.json"
+
+tasks:
+  # Check available space
+  - name: "Check available space"
+    type: "check_space"
+    required_bytes: 10485760  # 10 MB
+    mount_point: "${remote_base}"
+
+  # Cleanup old files (conditional)
+  - name: "Cleanup old test files"
+    type: "delete"
+    path: "${remote_base}/test_old"
+    recursive: true
+    ignore_missing: true
+    condition:
+      file_exists: "${remote_base}/test_old"
+
+  # Create directory structure
+  - name: "Create data directory"
+    type: "mkdir"
+    path: "${remote_base}/data/${version}"
+    parents: true
+    ignore_exists: true
+
+  - name: "Create assets directory"
+    type: "mkdir"
+    path: "${remote_base}/assets"
+    parents: true
+    ignore_exists: true
+
+  # Upload primary dataset with verification
+  - name: "Upload primary dataset"
+    type: "upload"
+    source: "${data_dir}/dataset_part1.bin"
+    destination: "${remote_base}/data/${version}/dataset_part1.bin"
+    verify: true
+    overwrite: false
+    condition:
+      file_not_exists: "${remote_base}/data/${version}/dataset_part1.bin"
+    retry:
+      max_attempts: 5
+      backoff_seconds: 3.0
+      exponential_backoff: true
+
+  - name: "Upload secondary dataset"
+    type: "upload"
+    source: "${data_dir}/dataset_part2.bin"
+    destination: "${remote_base}/data/${version}/dataset_part2.bin"
+    verify: true
+    overwrite: false
+    condition:
+      file_not_exists: "${remote_base}/data/${version}/dataset_part2.bin"
+
+  # Verify dataset hash (example - update with real CRC32 value)
+  - name: "Verify dataset hash"
+    type: "check_hash"
+    path: "${remote_base}/data/${version}/dataset_part1.bin"
+    expected_hash: "0x12345678"
+    enabled: false  # Disabled by default (update with real CRC32)
+
+  # Upload assets selectively
+  - name: "Upload assets directory"
+    type: "upload_dir"
+    source: "${assets_dir}/"
+    destination: "${remote_base}/assets/"
+    pattern: "*.bin"
+    exclude:
+      - "*_backup*"
+      - "*_old*"
+      - "*.tmp"
+    verify: false
+    overwrite: false
+    create_dirs: true
+
+  # Create backup of existing config (if exists)
+  - name: "Backup existing config"
+    type: "copy"
+    source: "${remote_base}/config.json"
+    destination: "${remote_base}/config.json.backup"
+    condition:
+      file_exists: "${remote_base}/config.json"
+    enabled: false  # Disabled by default
+
+  # Upload new config
+  - name: "Upload configuration"
+    type: "upload"
+    source: "./config.json"
+    destination: "${remote_base}/config.json"
+    verify: false
+    overwrite: true
+
+  # Final verification
+  - name: "List uploaded data"
+    type: "list"
+    path: "${remote_base}/data/${version}/"
+
+  - name: "List uploaded assets"
+    type: "list"
+    path: "${remote_base}/assets/"
+
+  # Verify total size (example - update with real size)
+  - name: "Verify dataset file size"
+    type: "verify_size"
+    path: "${remote_base}/data/${version}/dataset_part1.bin"
+    expected_size: 1048576  # Example: 1 MB (update with real size)
+    enabled: false  # Disabled by default
